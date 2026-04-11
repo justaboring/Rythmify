@@ -7,9 +7,6 @@ from utils import format_duration
 ytdl = youtube_dl.YoutubeDL(Config.YTDL_FORMAT_OPTIONS)
 
 
-
-
-
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
         super().__init__(source, volume)
@@ -58,7 +55,6 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
     @classmethod
     def _pick_best(cls, entries, query):
-        """Score candidates by view count + title relevance, return best entry."""
         query_words = set(query.lower().split())
         best = None
         best_score = -1
@@ -67,40 +63,31 @@ class YTDLSource(discord.PCMVolumeTransformer):
             if not entry:
                 continue
 
-            views = entry.get('view_count') or 0
-            title = (entry.get('title') or '').lower()
+            views    = entry.get('view_count') or 0
+            title    = (entry.get('title') or '').lower()
             duration = entry.get('duration') or 0
 
-            # Skip likely non-music: very short (<30s) or very long (>10min live streams)
             if duration < 30 or duration > 1500:
                 continue
 
-            # View score: log scale 0-50
             import math
-            view_score = math.log10(views + 1) * 2.5 if views > 0 else 0
-
-            # Relevance: ratio of query words found in title
-            matched = sum(1 for w in query_words if w in title)
+            view_score      = math.log10(views + 1) * 2.5 if views > 0 else 0
+            matched         = sum(1 for w in query_words if w in title)
             relevance_score = (matched / max(len(query_words), 1)) * 25
-
-            # Bonus: official/audio channels
-            uploader = (entry.get('uploader') or '').lower()
-            channel_bonus = 10 if any(k in uploader or k in title for k in ['official', 'audio', 'topic']) else 0
-
-            score = view_score + relevance_score + channel_bonus
+            uploader        = (entry.get('uploader') or '').lower()
+            channel_bonus   = 10 if any(k in uploader or k in title for k in ['official', 'audio', 'topic']) else 0
+            score           = view_score + relevance_score + channel_bonus
 
             if score > best_score:
                 best_score = score
                 best = entry
 
-        # Fallback to first if all filtered out
         return best or entries[0]
 
     @classmethod
     async def search(cls, query, *, loop=None, requester=None):
         loop = loop or asyncio.get_event_loop()
 
-        # Fetch 5 candidates
         raw = await loop.run_in_executor(
             None,
             lambda: ytdl.extract_info(f"ytsearch5:{query}", download=False)
@@ -109,16 +96,13 @@ class YTDLSource(discord.PCMVolumeTransformer):
         if not entries:
             raise Exception(f"No results for: {query}")
 
-        best = cls._pick_best(entries, query)
-
-        # Now get full stream URL for the chosen entry
+        best        = cls._pick_best(entries, query)
         webpage_url = best.get('webpage_url') or best.get('url')
         return await cls.from_url(webpage_url, loop=loop, requester=requester)
 
     @classmethod
     async def refresh(cls, song, *, loop=None):
-        """Re-extract a fresh stream URL right before playback."""
-        loop = loop or asyncio.get_event_loop()
+        loop        = loop or asyncio.get_event_loop()
         webpage_url = song.webpage_url
         if not webpage_url:
             return song
@@ -132,10 +116,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             data = data['entries'][0]
 
         stream_url = data['url']
-
         print(f"Refreshed stream URL for: {data.get('title', 'Unknown')}")
-        print(f"Format: {data.get('format', 'Unknown')}")
-        print(f"URL starts with: {stream_url[:60]}...")
 
         ffmpeg_audio = discord.FFmpegPCMAudio(
             stream_url,
@@ -144,7 +125,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             options=Config.FFMPEG_OPTIONS.get('options', '-vn')
         )
 
-        refreshed = cls(ffmpeg_audio, data=data, volume=song.volume)
+        refreshed           = cls(ffmpeg_audio, data=data, volume=song.volume)
         refreshed.requester = song.requester
         return refreshed
 
@@ -154,20 +135,19 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
 class GuildMusicState:
     def __init__(self, guild_id):
-        self.guild_id = guild_id
-        self.queue = []
-        self.current_song = None
-        self.skip_votes = set()
-        self.is_paused = False
-        self.volume = Config.DEFAULT_VOLUME / 100
+        self.guild_id          = guild_id
+        self.queue             = []
+        self.current_song      = None
+        self.skip_votes        = set()
+        self.is_paused         = False
+        self.volume            = Config.DEFAULT_VOLUME / 100
         self.now_playing_message = None
-        self.loop_mode = 'off'  # 'off' | 'one' | 'all'
-        self.song_start_time = None   # time.time() when current song started
-        self.pause_start_time = None  # time.time() when paused
-        self.paused_duration = 0      # total seconds spent paused
+        self.loop_mode         = 'off'
+        self.song_start_time   = None
+        self.pause_start_time  = None
+        self.paused_duration   = 0
 
     def get_elapsed(self):
-        """Seconds elapsed in current song, accounting for pauses."""
         import time
         if self.song_start_time is None:
             return 0
@@ -188,11 +168,10 @@ class GuildMusicState:
         return None
 
     def move_in_queue(self, from_idx, to_idx):
-        if 0 <= from_idx < len(self.queue):
-            if 0 <= to_idx < len(self.queue):
-                song = self.queue.pop(from_idx)
-                self.queue.insert(to_idx, song)
-                return True
+        if 0 <= from_idx < len(self.queue) and 0 <= to_idx < len(self.queue):
+            song = self.queue.pop(from_idx)
+            self.queue.insert(to_idx, song)
+            return True
         return False
 
     def shuffle(self):
@@ -206,20 +185,16 @@ class GuildMusicState:
     def get_queue_text(self, start=0, count=10):
         if not self.queue:
             return "Queue is empty"
-
         lines = []
         for i, song in enumerate(self.queue[start:start+count], start=start+1):
             duration = song.format_duration() if song.duration else "?:??"
-            title = song.title[:50] + "..." if len(song.title) > 50 else song.title
+            title    = song.title[:50] + "..." if len(song.title) > 50 else song.title
             lines.append(f"**{i}.** {title} | `{duration}`")
-
         if len(self.queue) > start + count:
             lines.append(f"*...and {len(self.queue) - start - count} more*")
-
         return "\n".join(lines)
 
 
-# Global state storage
 guild_states = {}
 
 
@@ -235,18 +210,17 @@ def cleanup_guild_state(guild_id):
 
 
 async def play_next_song(voice_client, guild_state, bot_loop):
+    from stats_store import record_play
+
     loop_mode = guild_state.loop_mode
 
-    # Loop one — re-queue current song at front
     if loop_mode == 'one' and guild_state.current_song:
         next_song = guild_state.current_song
     elif guild_state.queue:
         next_song = guild_state.queue.pop(0)
-        # Loop all — push finished song to back
         if loop_mode == 'all' and guild_state.current_song:
             guild_state.queue.append(guild_state.current_song)
     else:
-        # Loop all but queue empty (only 1 song ever) — replay current
         if loop_mode == 'all' and guild_state.current_song:
             next_song = guild_state.current_song
         else:
@@ -286,13 +260,16 @@ async def play_next_song(voice_client, guild_state, bot_loop):
 
         print(f"Starting playback: {next_song.title}")
         import time
-        guild_state.song_start_time = time.time()
-        guild_state.paused_duration = 0
+        guild_state.song_start_time  = time.time()
+        guild_state.paused_duration  = 0
         guild_state.pause_start_time = None
         voice_client.play(next_song, after=after_playing)
 
         if hasattr(voice_client.source, 'volume') and voice_client.source.volume is not None:
             voice_client.source.volume = guild_state.volume
+
+        # Record for stats
+        record_play(guild_state.guild_id, next_song.title)
 
         print(f"Now playing: {next_song.title}")
 

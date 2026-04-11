@@ -9,7 +9,7 @@ from music_player import (
     YTDLSource, GuildMusicState, get_guild_state,
     cleanup_guild_state, play_next_song
 )
-from spotify_module import SpotifyClient, spotify_to_youtube_query
+from soundcloud_module import SoundCloudClient, soundcloud_to_youtube_query
 from admin_module import is_dj, can_skip, SkipVoteManager, remove_from_queue, move_in_queue, shuffle_queue, clear_queue
 from ui_components import (
     NowPlayingView, QueueView, SkipVoteView, SongSelectView,
@@ -28,8 +28,8 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-# Initialize Spotify client
-spotify_client = SpotifyClient()
+# Initialize SoundCloud client
+soundcloud_client = SoundCloudClient()
 
 
 def get_voice_channel_members(voice_client):
@@ -49,7 +49,6 @@ async def ensure_voice(interaction: discord.Interaction):
 
     if voice_client is None:
         voice_client = await interaction.user.voice.channel.connect()
-        # Wait for voice connection to fully establish
         await asyncio.sleep(1)
     elif voice_client.channel != interaction.user.voice.channel:
         await interaction.response.send_message("❌ Bot is in a different voice channel!", ephemeral=True)
@@ -102,14 +101,12 @@ class MusicCog:
 
         guild_state = get_guild_state(interaction.guild_id)
 
-        # Check if DJ or use vote system
         success, message = can_skip(interaction.user, guild_state)
 
         if is_dj(interaction.user):
             await interaction.response.send_message("⏭️ Skipped by DJ!")
             voice_client.stop()
         else:
-            # Add vote
             added, vote_message = SkipVoteManager.add_vote(interaction.user.id, guild_state)
             if not added:
                 return await interaction.response.send_message(f"❌ {vote_message}", ephemeral=True)
@@ -184,7 +181,7 @@ class MusicCog:
         embed = create_queue_embed(guild_state, page)
         await interaction.response.edit_message(embed=embed)
 
-    async def song_selected_callback(self, interaction: discord.Interaction, song_data, is_spotify: bool):
+    async def song_selected_callback(self, interaction: discord.Interaction, song_data, is_soundcloud: bool):
         await interaction.response.defer()
 
         voice_client = await ensure_voice(interaction)
@@ -194,9 +191,8 @@ class MusicCog:
         guild_state = get_guild_state(interaction.guild_id)
 
         try:
-            if is_spotify:
-                # Convert Spotify track to YouTube search
-                query = spotify_to_youtube_query(song_data)
+            if is_soundcloud:
+                query = soundcloud_to_youtube_query(song_data)
                 source = await YTDLSource.search(query, loop=bot.loop, requester=interaction.user)
             else:
                 source = song_data
@@ -234,8 +230,8 @@ async def join(interaction: discord.Interaction):
         await interaction.response.send_message(f"✅ Moved to **{interaction.user.voice.channel.name}**")
 
 
-@app_commands.command(name="play", description="Play music from YouTube or Spotify")
-@app_commands.describe(query="Song name, URL, or Spotify link")
+@app_commands.command(name="play", description="Play music from YouTube or SoundCloud URL")
+@app_commands.describe(query="Song name or URL")
 async def play(interaction: discord.Interaction, query: str):
     await interaction.response.defer()
 
@@ -246,56 +242,6 @@ async def play(interaction: discord.Interaction, query: str):
     guild_state = get_guild_state(interaction.guild_id)
 
     try:
-        # Check if Spotify URL
-        spotify_info = parse_spotify_url(query)
-
-        if spotify_info:
-            url_type, spotify_id = spotify_info
-
-            if url_type == 'track':
-                track = spotify_client.get_track(spotify_id)
-                if track:
-                    query = spotify_to_youtube_query(track)
-                else:
-                    return await interaction.followup.send("❌ Could not fetch Spotify track!")
-            elif url_type == 'playlist':
-                tracks = spotify_client.get_playlist_tracks(spotify_id)
-                if tracks:
-                    await interaction.followup.send(f"🎵 Adding {len(tracks)} tracks from playlist...")
-                    added = 0
-                    for track in tracks:
-                        if added >= 50:  # Limit to 50 tracks
-                            break
-                        try:
-                            yt_query = spotify_to_youtube_query(track)
-                            source = await YTDLSource.search(yt_query, loop=bot.loop, requester=interaction.user)
-                            if guild_state.add_to_queue(source):
-                                added += 1
-                        except:
-                            continue
-                    return await interaction.channel.send(f"✅ Added {added} tracks to queue!")
-                else:
-                    return await interaction.followup.send("❌ Could not fetch Spotify playlist!")
-            elif url_type == 'album':
-                tracks = spotify_client.get_album_tracks(spotify_id)
-                if tracks:
-                    await interaction.followup.send(f"🎵 Adding {len(tracks)} tracks from album...")
-                    added = 0
-                    for track in tracks:
-                        if added >= 50:
-                            break
-                        try:
-                            yt_query = spotify_to_youtube_query(track)
-                            source = await YTDLSource.search(yt_query, loop=bot.loop, requester=interaction.user)
-                            if guild_state.add_to_queue(source):
-                                added += 1
-                        except:
-                            continue
-                    return await interaction.channel.send(f"✅ Added {added} tracks to queue!")
-                else:
-                    return await interaction.followup.send("❌ Could not fetch Spotify album!")
-
-        # Check if YouTube URL
         if not query.startswith('http'):
             query = f"ytsearch:{query}"
 
@@ -326,7 +272,6 @@ async def search(interaction: discord.Interaction, query: str):
         search_query = f"ytsearch5:{query}"
         sources = []
 
-        # Get multiple results
         data = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: YTDLSource.ytdl.extract_info(search_query, download=False)
@@ -354,36 +299,35 @@ async def search(interaction: discord.Interaction, query: str):
         await interaction.followup.send(f"❌ Error: {str(e)}")
 
 
-@app_commands.command(name="spotify", description="Search Spotify and play the first result")
+@app_commands.command(name="soundcloud", description="Search SoundCloud and play the first result")
 @app_commands.describe(query="Song name or artist")
-async def spotify_search(interaction: discord.Interaction, query: str):
+async def soundcloud_play(interaction: discord.Interaction, query: str):
     await interaction.response.defer()
 
-    if not spotify_client.is_available():
-        return await interaction.followup.send("❌ Spotify API not configured!")
+    if not soundcloud_client.is_available():
+        return await interaction.followup.send("❌ SoundCloud not available!")
 
-    tracks = spotify_client.search_track(query, limit=1)
+    tracks = soundcloud_client.search_track(query, limit=1)
     if not tracks:
-        return await interaction.followup.send("❌ No Spotify results found!")
+        return await interaction.followup.send("❌ No SoundCloud results found!")
 
-    # Proceed with playing the track
     await MusicCog(bot).song_selected_callback(interaction, tracks[0], True)
 
 
-@app_commands.command(name="spotify_search", description="Search Spotify and choose from results")
+@app_commands.command(name="soundcloud_search", description="Search SoundCloud and choose from results")
 @app_commands.describe(query="Song name or artist")
-async def spotify_search_multi(interaction: discord.Interaction, query: str):
+async def soundcloud_search(interaction: discord.Interaction, query: str):
     await interaction.response.defer()
 
-    if not spotify_client.is_available():
-        return await interaction.followup.send("❌ Spotify API not configured!")
+    if not soundcloud_client.is_available():
+        return await interaction.followup.send("❌ SoundCloud not available!")
 
-    tracks = spotify_client.search_track(query, limit=5)
+    tracks = soundcloud_client.search_track(query, limit=5)
     if not tracks:
-        return await interaction.followup.send("❌ No Spotify results found!")
+        return await interaction.followup.send("❌ No SoundCloud results found!")
 
-    view = SongSelectView(MusicCog(bot), tracks, is_spotify=True)
-    await interaction.followup.send("🎵 Select a Spotify track:", view=view)
+    view = SongSelectView(MusicCog(bot), tracks, is_spotify=True)  # reuse SongSelectView, works for SC too
+    await interaction.followup.send("🎵 Select a SoundCloud track:", view=view)
 
 
 @app_commands.command(name="skip", description="Vote to skip current song")
@@ -513,7 +457,7 @@ async def remove(interaction: discord.Interaction, position: int):
         return await interaction.response.send_message("❌ DJ only command!", ephemeral=True)
 
     guild_state = get_guild_state(interaction.guild_id)
-    removed = remove_from_queue(guild_state, position - 1)  # Convert to 0-indexed
+    removed = remove_from_queue(guild_state, position - 1)
 
     if removed:
         await interaction.response.send_message(f"🗑️ Removed: **{removed.title}**")
@@ -583,10 +527,10 @@ async def help_command(interaction: discord.Interaction):
     )
 
     commands_list = [
-        ("/play <query>", "Play from YouTube/Spotify"),
+        ("/play <query>", "Play from YouTube or URL"),
         ("/search <query>", "Search YouTube, pick from results"),
-        ("/spotify <query>", "Search Spotify, play first result"),
-        ("/spotify_search <query>", "Search Spotify, pick from results"),
+        ("/soundcloud <query>", "Search SoundCloud, play first result"),
+        ("/soundcloud_search <query>", "Search SoundCloud, pick from results"),
         ("/pause", "Pause playback"),
         ("/resume", "Resume playback"),
         ("/skip", "Vote to skip"),
@@ -613,8 +557,8 @@ async def help_command(interaction: discord.Interaction):
 bot.tree.add_command(join)
 bot.tree.add_command(play)
 bot.tree.add_command(search)
-bot.tree.add_command(spotify_search)
-bot.tree.add_command(spotify_search_multi)
+bot.tree.add_command(soundcloud_play)
+bot.tree.add_command(soundcloud_search)
 bot.tree.add_command(skip)
 bot.tree.add_command(forceskip)
 bot.tree.add_command(pause)
@@ -630,14 +574,13 @@ bot.tree.add_command(clear)
 bot.tree.add_command(leave)
 bot.tree.add_command(help_command)
 
-# Event handlers
+
 @bot.event
 async def on_ready():
     print(f'Bot online as {bot.user}!')
     print(f'ID: {bot.user.id}')
     print('------')
 
-    # Sync slash commands
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash commands")
@@ -651,10 +594,8 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    """Cleanup when bot is disconnected"""
     if member == bot.user:
         if before.channel and not after.channel:
-            # Bot was disconnected
             guild_state = get_guild_state(member.guild.id)
             guild_state.clear()
             guild_state.current_song = None
@@ -666,11 +607,9 @@ async def on_voice_state_update(member, before, after):
                 guild_state.now_playing_message = None
 
 
-# Main entry point
 if __name__ == '__main__':
     token = Config.DISCORD_TOKEN
     if not token:
         print("❌ DISCORD_TOKEN not set in .env file!")
-        print("Please create a .env file with DISCORD_TOKEN=your_token")
     else:
         bot.run(token)

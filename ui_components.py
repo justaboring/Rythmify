@@ -3,32 +3,93 @@ from config import Config
 
 
 class Colors:
-    CREAM_WHITE = 0xFFFEF9
-    SOFT_WHITE  = 0xF0F0F0
-    LIGHT_BLUE  = 0xADD8E6
-    PASTEL_PINK = 0xFFB6C1
-    MINT        = 0x98FB98
-    LAVENDER    = 0xE6E6FA
-    PEACH       = 0xFFDAB9
-    ACCENT_BLUE = 0x5865F2
-    ACCENT_GREEN= 0x57F287
-    ACCENT_RED  = 0xED4245
-    TEAL        = 0x1ABC9C   # FlaviBot "Now playing" teal
+    CREAM_WHITE  = 0xFFFEF9
+    SOFT_WHITE   = 0xF0F0F0
+    LIGHT_BLUE   = 0xADD8E6
+    PASTEL_PINK  = 0xFFB6C1
+    MINT         = 0x98FB98
+    LAVENDER     = 0xE6E6FA
+    PEACH        = 0xFFDAB9
+    ACCENT_BLUE  = 0x5865F2
+    ACCENT_GREEN = 0x57F287
+    ACCENT_RED   = 0xED4245
+    TEAL         = 0x1ABC9C
 
 
 # ──────────────────────────────────────────────
-# CONTROL PANEL VIEW  (permanent, no timeout)
+# DASHBOARD EMBED
+# ──────────────────────────────────────────────
+
+def create_dashboard_embed(guild_state, voice_client=None, guild=None) -> discord.Embed:
+    from stats_store import get_stats
+
+    embed = discord.Embed(title="📊 Music Dashboard", color=Colors.ACCENT_BLUE)
+
+    # Who's listening
+    if voice_client and voice_client.channel:
+        members = [m for m in voice_client.channel.members if not m.bot]
+        names   = "\n".join(f"🎧 {m.display_name}" for m in members) if members else "*Nobody here*"
+        embed.add_field(
+            name=f"🔊 {voice_client.channel.name} ({len(members)} listening)",
+            value=names,
+            inline=False
+        )
+    else:
+        embed.add_field(name="🔊 Voice", value="*Bot not in voice channel*", inline=False)
+
+    # Queue full list
+    if guild_state.current_song:
+        st  = "⏸" if guild_state.is_paused else "▶"
+        dur = guild_state.current_song.format_duration() if guild_state.current_song.duration else "?:??"
+        now = f"{st} **{guild_state.current_song.title[:55]}** — `{dur}`"
+    else:
+        now = "*Nothing playing*"
+
+    if guild_state.queue:
+        lines = [now]
+        for i, s in enumerate(guild_state.queue[:10], start=1):
+            d = s.format_duration() if s.duration else "?:??"
+            t = s.title[:50] + "…" if len(s.title) > 50 else s.title
+            lines.append(f"`{i}.` {t} — `{d}`")
+        if len(guild_state.queue) > 10:
+            lines.append(f"*…and {len(guild_state.queue) - 10} more*")
+        queue_text = "\n".join(lines)
+    else:
+        queue_text = now + "\n*Queue is empty*"
+
+    embed.add_field(name="📋 Queue", value=queue_text, inline=False)
+
+    # Stats
+    if guild:
+        stats = get_stats(guild.id)
+        total = stats["total_played"]
+        top   = stats["top_songs"]
+        top_text = "\n".join(
+            f"`{i}.` {title[:45]} — `{count}x`"
+            for i, (title, count) in enumerate(top, start=1)
+        ) if top else "*No songs played yet*"
+        embed.add_field(
+            name=f"🎵 Stats — {total} songs played total",
+            value=top_text,
+            inline=False
+        )
+
+    embed.set_footer(text=f"Volume: {int(guild_state.volume * 100)}%  |  {len(guild_state.queue)} in queue")
+    return embed
+
+
+# ──────────────────────────────────────────────
+# CONTROL PANEL VIEW
 # ──────────────────────────────────────────────
 
 class ControlPanelView(discord.ui.View):
     def __init__(self, music_cog, guild_state, page=0, timeout=None):
         super().__init__(timeout=timeout)
-        self.music_cog  = music_cog
+        self.music_cog   = music_cog
         self.guild_state = guild_state
-        self.page       = page
-        self.per_page   = 8
+        self.page        = page
+        self.per_page    = 8
 
-    # Row 0 — volume + playback
     @discord.ui.button(emoji="🔉", label="Down",     style=discord.ButtonStyle.secondary, custom_id="cp_vol_down",  row=0)
     async def vol_down_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.volume_down_callback(interaction)
@@ -50,30 +111,27 @@ class ControlPanelView(discord.ui.View):
     async def vol_up_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.volume_up_callback(interaction)
 
-    # Row 1 — queue controls
-    @discord.ui.button(emoji="🔀", label="Shuffle",   style=discord.ButtonStyle.secondary, custom_id="cp_shuffle",  row=1)
+    @discord.ui.button(emoji="🔀", label="Shuffle",  style=discord.ButtonStyle.secondary, custom_id="cp_shuffle",  row=1)
     async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.shuffle_callback(interaction)
         await self._refresh_panel(interaction)
 
-    @discord.ui.button(emoji="🔁", label="AutoPlay",  style=discord.ButtonStyle.secondary, custom_id="cp_autoplay", row=1)
+    @discord.ui.button(emoji="🔁", label="AutoPlay", style=discord.ButtonStyle.secondary, custom_id="cp_autoplay", row=1)
     async def autoplay_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("🔁 AutoPlay not implemented yet.", ephemeral=True)
 
-    @discord.ui.button(emoji="🤍", label="Like",      style=discord.ButtonStyle.secondary, custom_id="cp_like",     row=1)
+    @discord.ui.button(emoji="🤍", label="Like",     style=discord.ButtonStyle.secondary, custom_id="cp_like",     row=1)
     async def like_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("🤍 Like saved!", ephemeral=True)
 
-    @discord.ui.button(emoji="⏹️", label="Stop",     style=discord.ButtonStyle.danger,    custom_id="cp_stop",     row=1)
+    @discord.ui.button(emoji="⏹️", label="Stop",    style=discord.ButtonStyle.danger,    custom_id="cp_stop",     row=1)
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.stop_callback(interaction)
         await self._refresh_panel(interaction)
 
-    @discord.ui.button(emoji="📊", label="Dashboard", style=discord.ButtonStyle.secondary, custom_id="cp_dash",     row=1)
+    @discord.ui.button(emoji="📊", label="Dashboard",style=discord.ButtonStyle.secondary, custom_id="cp_dash",     row=1)
     async def dashboard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("📊 Dashboard not implemented yet.", ephemeral=True)
-
-    # ── helpers ──
+        await self.music_cog.dashboard_callback(interaction)
 
     async def _refresh_panel(self, interaction: discord.Interaction):
         embed = create_control_panel_embed(self.guild_state)
@@ -88,26 +146,16 @@ class ControlPanelView(discord.ui.View):
         for child in self.children:
             if getattr(child, 'custom_id', None) == "cp_pause":
                 child.label = "Resume" if is_paused else "Pause"
-                child.emoji  = discord.PartialEmoji(name="▶️") if is_paused else discord.PartialEmoji(name="⏸️")
-                child.style  = discord.ButtonStyle.success
+                child.emoji = discord.PartialEmoji(name="▶️") if is_paused else discord.PartialEmoji(name="⏸️")
+                child.style = discord.ButtonStyle.success
 
 
-# Keep alias so bot.py import still works
 NowPlayingView = ControlPanelView
 
-
-# ──────────────────────────────────────────────
-# CONTROL PANEL EMBED  (waiting / now-playing)
-# ──────────────────────────────────────────────
-
-BANNER_URL = "https://i.imgur.com/4M7IWwP.png"   # generic music banner; swap freely
+BANNER_URL = "https://i.imgur.com/4M7IWwP.png"
 
 
 def create_control_panel_embed(guild_state) -> discord.Embed:
-    """
-    Idle  → 'Music Controller' title, banner image, 'Waiting for music…'
-    Playing → compact now-playing card inside embed
-    """
     if guild_state.current_song is None:
         embed = discord.Embed(
             title="Music Controller",
@@ -124,7 +172,6 @@ def create_control_panel_embed(guild_state) -> discord.Embed:
     dur     = song.format_duration() if song.duration else "?:??"
     vol_pct = int(guild_state.volume * 100)
 
-    # Next-up line
     next_line = ""
     if guild_state.queue:
         nxt     = guild_state.queue[0]
@@ -132,10 +179,9 @@ def create_control_panel_embed(guild_state) -> discord.Embed:
         nxt_dur = nxt.format_duration() if nxt.duration else "?:??"
         next_line = f"**Next song:**\n{nxt_t} — `{nxt_dur}`\n\n"
 
-    # Queue summary
-    q_count = len(guild_state.queue)
+    q_count     = len(guild_state.queue)
     q_dur_total = sum(s.duration or 0 for s in guild_state.queue)
-    q_summary = _fmt_dur(q_dur_total) if q_dur_total else "?:??"
+    q_summary   = _fmt_dur(q_dur_total) if q_dur_total else "?:??"
 
     description = (
         f"{next_line}"
@@ -145,7 +191,10 @@ def create_control_panel_embed(guild_state) -> discord.Embed:
     if song.requester:
         description += f"Requested by {song.requester.mention}\n"
     if q_count:
-        description += f"\n`{q_count}` song{'s' if q_count != 1 else ''} in queue for `{q_summary}` of listening  |  Volume: `{vol_pct}%`"
+        description += (
+            f"\n`{q_count}` song{'s' if q_count != 1 else ''} in queue "
+            f"for `{q_summary}` of listening  |  Volume: `{vol_pct}%`"
+        )
 
     embed = discord.Embed(description=description, color=Colors.TEAL)
     if song.thumbnail:
@@ -155,7 +204,7 @@ def create_control_panel_embed(guild_state) -> discord.Embed:
 
 
 # ──────────────────────────────────────────────
-# LEGACY HELPERS  (keep bot.py working)
+# LEGACY HELPERS
 # ──────────────────────────────────────────────
 
 def create_panel_embed(guild_state, page=0, per_page=8):
@@ -167,8 +216,7 @@ def create_now_playing_embed(song, guild_state):
 
 
 def create_queue_embed(guild_state, page=0, per_page=10):
-    """Separate /queue command embed — FlaviBot-style list."""
-    embed = discord.Embed(title="📋 Queue", color=Colors.ACCENT_BLUE)
+    embed = discord.Embed(title="📋 Your Queue View", color=Colors.ACCENT_BLUE)
 
     if not guild_state.queue and not guild_state.current_song:
         embed.description = "Queue is empty."
@@ -196,7 +244,6 @@ def create_queue_embed(guild_state, page=0, per_page=10):
 
 
 def create_added_embed(song, position=None):
-    """Ephemeral 'Added to queue' — FlaviBot style."""
     dur   = song.format_duration() if song.duration else "?:??"
     title = song.title[:80] + "…" if len(song.title) > 80 else song.title
     pos   = f" at #{position}" if position else ""
@@ -222,7 +269,7 @@ def create_info_embed(title, message):
 
 
 # ──────────────────────────────────────────────
-# OTHER VIEWS  (unchanged)
+# OTHER VIEWS
 # ──────────────────────────────────────────────
 
 class QueueView(discord.ui.View):

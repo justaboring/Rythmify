@@ -13,34 +13,58 @@ from soundcloud_module import SoundCloudClient, soundcloud_to_youtube_query
 from admin_module import is_dj, can_skip, SkipVoteManager, remove_from_queue, move_in_queue, shuffle_queue, clear_queue
 from ui_components import (
     NowPlayingView, QueueView, SkipVoteView, SongSelectView,
-    create_now_playing_embed, create_queue_embed, create_added_embed
+    create_now_playing_embed, create_queue_embed, create_added_embed,
+    ControlPanelView, create_control_panel_embed, create_dashboard_embed
 )
+from panel_store import get_panel, set_panel, clear_panel
 from utils import parse_spotify_url, is_url
 
-# Setup SSL configuration
 Config.setup_ssl()
 Config.validate()
 
-# Bot setup
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-# Initialize SoundCloud client
 soundcloud_client = SoundCloudClient()
 
 
-def get_voice_channel_members(voice_client):
-    """Get non-bot member count in voice channel"""
-    if not voice_client or not voice_client.channel:
-        return 0
-    return len([m for m in voice_client.channel.members if not m.bot])
+# ──────────────────────────────────────────────
+# PANEL HELPERS
+# ──────────────────────────────────────────────
 
+async def get_panel_message(guild: discord.Guild):
+    info = get_panel(guild.id)
+    if not info:
+        return None
+    try:
+        channel = guild.get_channel(info["channel_id"])
+        if not channel:
+            return None
+        return await channel.fetch_message(info["message_id"])
+    except Exception:
+        return None
+
+
+async def refresh_panel(guild: discord.Guild, guild_state):
+    msg = await get_panel_message(guild)
+    if not msg:
+        return
+    embed = create_control_panel_embed(guild_state)
+    view  = ControlPanelView(MusicCog(bot), guild_state, timeout=None)
+    try:
+        await msg.edit(embed=embed, view=view)
+    except Exception:
+        pass
+
+
+# ──────────────────────────────────────────────
+# VOICE HELPERS
+# ──────────────────────────────────────────────
 
 async def ensure_voice(interaction: discord.Interaction):
-    """Ensure bot is in voice channel with user"""
     if not interaction.user.voice:
         await interaction.response.send_message("❌ You must be in a voice channel!", ephemeral=True)
         return None
@@ -57,32 +81,25 @@ async def ensure_voice(interaction: discord.Interaction):
     return voice_client
 
 
-async def send_now_playing(interaction: discord.Interaction, guild_state: GuildMusicState):
-    """Send or edit the persistent control panel."""
-    from ui_components import ControlPanelView, create_panel_embed
-    embed = create_panel_embed(guild_state)
-    view = ControlPanelView(MusicCog(bot), guild_state, timeout=None)
-
-    if guild_state.now_playing_message:
-        try:
-            await guild_state.now_playing_message.edit(embed=embed, view=view)
-            return
-        except Exception:
-            pass
-
-    guild_state.now_playing_message = await interaction.followup.send(embed=embed, view=view)
-
+# ──────────────────────────────────────────────
+# MUSIC COG
+# ──────────────────────────────────────────────
 
 class MusicCog:
-    """Helper class for button callbacks"""
     def __init__(self, bot):
         self.bot = bot
 
+    async def dashboard_callback(self, interaction: discord.Interaction):
+        guild_state  = get_guild_state(interaction.guild_id)
+        voice_client = interaction.guild.voice_client
+        embed = create_dashboard_embed(guild_state, voice_client=voice_client, guild=interaction.guild)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     async def pause_callback(self, interaction: discord.Interaction):
         voice_client = interaction.guild.voice_client
-        guild_state = get_guild_state(interaction.guild_id)
+        guild_state  = get_guild_state(interaction.guild_id)
 
-        if not voice_client or not voice_client.is_playing() and not voice_client.is_paused():
+        if not voice_client or (not voice_client.is_playing() and not voice_client.is_paused()):
             return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
 
         if voice_client.is_paused():
@@ -94,6 +111,8 @@ class MusicCog:
             guild_state.is_paused = True
             await interaction.response.send_message("⏸️ Paused!", ephemeral=True)
 
+        await refresh_panel(interaction.guild, guild_state)
+
     async def skip_callback(self, interaction: discord.Interaction):
         voice_client = interaction.guild.voice_client
         if not voice_client or not voice_client.is_playing():
@@ -101,24 +120,24 @@ class MusicCog:
 
         guild_state = get_guild_state(interaction.guild_id)
 
-        success, message = can_skip(interaction.user, guild_state)
-
         if is_dj(interaction.user):
-            await interaction.response.send_message("⏭️ Skipped by DJ!")
+            await interaction.response.send_message("⏭️ Skipped by DJ!", ephemeral=True)
             voice_client.stop()
         else:
             added, vote_message = SkipVoteManager.add_vote(interaction.user.id, guild_state)
             if not added:
                 return await interaction.response.send_message(f"❌ {vote_message}", ephemeral=True)
 
-            threshold = SkipVoteManager.get_threshold(voice_client.channel)
+            threshold     = SkipVoteManager.get_threshold(voice_client.channel)
             current_votes = SkipVoteManager.get_vote_count(guild_state)
 
             if current_votes >= threshold:
-                await interaction.response.send_message(f"⏭️ Skip vote passed ({current_votes}/{threshold})!")
+                await interaction.response.send_message(f"⏭️ Skip vote passed ({current_votes}/{threshold})!", ephemeral=True)
                 voice_client.stop()
             else:
                 await interaction.response.send_message(f"🗳️ Vote counted! ({current_votes}/{threshold} needed)", ephemeral=True)
+
+        await refresh_panel(interaction.guild, guild_state)
 
     async def stop_callback(self, interaction: discord.Interaction):
         if not is_dj(interaction.user):
@@ -131,7 +150,8 @@ class MusicCog:
         guild_state = get_guild_state(interaction.guild_id)
         guild_state.clear()
         voice_client.stop()
-        await interaction.response.send_message("⏹️ Stopped and cleared queue!")
+        await interaction.response.send_message("⏹️ Stopped and cleared queue!", ephemeral=True)
+        await refresh_panel(interaction.guild, guild_state)
 
     async def volume_up_callback(self, interaction: discord.Interaction):
         voice_client = interaction.guild.voice_client
@@ -142,7 +162,6 @@ class MusicCog:
         new_vol = min(1.0, guild_state.volume + 0.1)
         guild_state.volume = new_vol
         voice_client.source.volume = new_vol
-
         await interaction.response.send_message(f"🔊 Volume: {int(new_vol * 100)}%", ephemeral=True)
 
     async def volume_down_callback(self, interaction: discord.Interaction):
@@ -154,7 +173,6 @@ class MusicCog:
         new_vol = max(0.0, guild_state.volume - 0.1)
         guild_state.volume = new_vol
         voice_client.source.volume = new_vol
-
         await interaction.response.send_message(f"🔊 Volume: {int(new_vol * 100)}%", ephemeral=True)
 
     async def shuffle_callback(self, interaction: discord.Interaction):
@@ -166,7 +184,8 @@ class MusicCog:
             return await interaction.response.send_message("❌ Queue is empty!", ephemeral=True)
 
         shuffle_queue(guild_state)
-        await interaction.response.send_message("🔀 Queue shuffled!")
+        await interaction.response.send_message("🔀 Queue shuffled!", ephemeral=True)
+        await refresh_panel(interaction.guild, guild_state)
 
     async def clear_callback(self, interaction: discord.Interaction):
         if not is_dj(interaction.user):
@@ -174,7 +193,8 @@ class MusicCog:
 
         guild_state = get_guild_state(interaction.guild_id)
         clear_queue(guild_state)
-        await interaction.response.send_message("🗑️ Queue cleared!")
+        await interaction.response.send_message("🗑️ Queue cleared!", ephemeral=True)
+        await refresh_panel(interaction.guild, guild_state)
 
     async def update_queue_embed(self, interaction: discord.Interaction, page: int):
         guild_state = get_guild_state(interaction.guild_id)
@@ -182,7 +202,7 @@ class MusicCog:
         await interaction.response.edit_message(embed=embed)
 
     async def song_selected_callback(self, interaction: discord.Interaction, song_data, is_soundcloud: bool):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
         voice_client = await ensure_voice(interaction)
         if not voice_client:
@@ -192,7 +212,7 @@ class MusicCog:
 
         try:
             if is_soundcloud:
-                query = soundcloud_to_youtube_query(song_data)
+                query  = soundcloud_to_youtube_query(song_data)
                 source = await YTDLSource.search(query, loop=bot.loop, requester=interaction.user)
             else:
                 source = song_data
@@ -201,20 +221,58 @@ class MusicCog:
             already_playing = voice_client.is_playing() or voice_client.is_paused()
 
             if not guild_state.add_to_queue(source):
-                return await interaction.followup.send("❌ Queue is full!")
+                return await interaction.followup.send("❌ Queue is full!", ephemeral=True)
 
-            if already_playing:
-                embed = create_added_embed(source, len(guild_state.queue))
-                await interaction.followup.send(embed=embed)
-            else:
+            embed = create_added_embed(source, len(guild_state.queue))
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+            if not already_playing:
                 await play_next_song(voice_client, guild_state, bot.loop)
-                await send_now_playing(interaction, guild_state)
+
+            await refresh_panel(interaction.guild, guild_state)
 
         except Exception as e:
-            await interaction.followup.send(f"❌ Error: {str(e)}")
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
 
-# Slash Commands
+# ──────────────────────────────────────────────
+# SLASH COMMANDS
+# ──────────────────────────────────────────────
+
+@app_commands.command(name="controlpanel", description="Toggle persistent music control panel in this channel (DJ/Admin only)")
+async def controlpanel(interaction: discord.Interaction):
+    if not is_dj(interaction.user):
+        return await interaction.response.send_message("❌ DJ or Admin only!", ephemeral=True)
+
+    guild_id = interaction.guild_id
+    existing = get_panel(guild_id)
+
+    if existing:
+        try:
+            ch  = interaction.guild.get_channel(existing["channel_id"])
+            msg = await ch.fetch_message(existing["message_id"])
+            await msg.delete()
+        except Exception:
+            pass
+        clear_panel(guild_id)
+        return await interaction.response.send_message("🗑️ Control panel disabled.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True)
+
+    guild_state = get_guild_state(guild_id)
+    embed = create_control_panel_embed(guild_state)
+    view  = ControlPanelView(MusicCog(bot), guild_state, timeout=None)
+
+    panel_msg = await interaction.channel.send(embed=embed, view=view)
+    set_panel(guild_id, interaction.channel_id, panel_msg.id)
+
+    await interaction.followup.send(
+        f"✅ Control panel active in {interaction.channel.mention}!\n"
+        f"Use `/play` to add songs — panel updates automatically.",
+        ephemeral=True
+    )
+
+
 @app_commands.command(name="join", description="Join your voice channel")
 async def join(interaction: discord.Interaction):
     if not interaction.user.voice:
@@ -224,16 +282,16 @@ async def join(interaction: discord.Interaction):
 
     if voice_client is None:
         await interaction.user.voice.channel.connect()
-        await interaction.response.send_message(f"✅ Joined **{interaction.user.voice.channel.name}**")
+        await interaction.response.send_message(f"✅ Joined **{interaction.user.voice.channel.name}**", ephemeral=True)
     else:
         await voice_client.move_to(interaction.user.voice.channel)
-        await interaction.response.send_message(f"✅ Moved to **{interaction.user.voice.channel.name}**")
+        await interaction.response.send_message(f"✅ Moved to **{interaction.user.voice.channel.name}**", ephemeral=True)
 
 
-@app_commands.command(name="play", description="Play music from YouTube or SoundCloud URL")
+@app_commands.command(name="play", description="Play music from YouTube or URL")
 @app_commands.describe(query="Song name or URL")
 async def play(interaction: discord.Interaction, query: str):
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=True)
 
     voice_client = await ensure_voice(interaction)
     if not voice_client:
@@ -250,84 +308,75 @@ async def play(interaction: discord.Interaction, query: str):
         already_playing = voice_client.is_playing() or voice_client.is_paused()
 
         if not guild_state.add_to_queue(source):
-            return await interaction.followup.send("❌ Queue is full!")
+            return await interaction.followup.send("❌ Queue is full!", ephemeral=True)
 
-        if already_playing:
-            embed = create_added_embed(source, len(guild_state.queue))
-            await interaction.followup.send(embed=embed)
-        else:
+        embed = create_added_embed(source, len(guild_state.queue))
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        if not already_playing:
             await play_next_song(voice_client, guild_state, bot.loop)
-            await send_now_playing(interaction, guild_state)
+
+        await refresh_panel(interaction.guild, guild_state)
 
     except Exception as e:
-        await interaction.followup.send(f"❌ Error: {str(e)}")
+        await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
 
 @app_commands.command(name="search", description="Search YouTube and choose from results")
 @app_commands.describe(query="Song name to search")
 async def search(interaction: discord.Interaction, query: str):
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=True)
 
     try:
-        search_query = f"ytsearch5:{query}"
-        sources = []
+        import yt_dlp as youtube_dl
+        ytdl = youtube_dl.YoutubeDL(Config.YTDL_FORMAT_OPTIONS)
 
         data = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: YTDLSource.ytdl.extract_info(search_query, download=False)
+            lambda: ytdl.extract_info(f"ytsearch5:{query}", download=False)
         )
 
+        sources = []
         if 'entries' in data:
-            entries = list(data['entries'])[:5]
-            for entry in entries:
+            for entry in list(data['entries'])[:5]:
                 source = type('obj', (object,), {
-                    'title': entry.get('title'),
-                    'uploader': entry.get('uploader'),
-                    'duration': entry.get('duration'),
+                    'title':     entry.get('title'),
+                    'uploader':  entry.get('uploader'),
+                    'duration':  entry.get('duration'),
                     'thumbnail': entry.get('thumbnail'),
-                    'data': entry
+                    'data':      entry
                 })()
                 sources.append(source)
 
         if not sources:
-            return await interaction.followup.send("❌ No results found!")
+            return await interaction.followup.send("❌ No results found!", ephemeral=True)
 
         view = SongSelectView(MusicCog(bot), sources, is_spotify=False)
-        await interaction.followup.send("🎵 Select a song:", view=view)
+        await interaction.followup.send("🎵 Select a song:", view=view, ephemeral=True)
 
     except Exception as e:
-        await interaction.followup.send(f"❌ Error: {str(e)}")
+        await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
 
-@app_commands.command(name="soundcloud", description="Search SoundCloud and play the first result")
+@app_commands.command(name="soundcloud", description="Search SoundCloud, play first result")
 @app_commands.describe(query="Song name or artist")
 async def soundcloud_play(interaction: discord.Interaction, query: str):
-    await interaction.response.defer()
-
-    if not soundcloud_client.is_available():
-        return await interaction.followup.send("❌ SoundCloud not available!")
-
+    await interaction.response.defer(ephemeral=True)
     tracks = soundcloud_client.search_track(query, limit=1)
     if not tracks:
-        return await interaction.followup.send("❌ No SoundCloud results found!")
-
+        return await interaction.followup.send("❌ No SoundCloud results found!", ephemeral=True)
     await MusicCog(bot).song_selected_callback(interaction, tracks[0], True)
 
 
 @app_commands.command(name="soundcloud_search", description="Search SoundCloud and choose from results")
 @app_commands.describe(query="Song name or artist")
 async def soundcloud_search(interaction: discord.Interaction, query: str):
-    await interaction.response.defer()
-
-    if not soundcloud_client.is_available():
-        return await interaction.followup.send("❌ SoundCloud not available!")
-
+    await interaction.response.defer(ephemeral=True)
     tracks = soundcloud_client.search_track(query, limit=5)
     if not tracks:
-        return await interaction.followup.send("❌ No SoundCloud results found!")
-
-    view = SongSelectView(MusicCog(bot), tracks, is_spotify=True)  # reuse SongSelectView, works for SC too
-    await interaction.followup.send("🎵 Select a SoundCloud track:", view=view)
+        return await interaction.followup.send("❌ No SoundCloud results found!", ephemeral=True)
+    view = SongSelectView(MusicCog(bot), tracks, is_spotify=True)
+    await interaction.followup.send("🎵 Select a SoundCloud track:", view=view, ephemeral=True)
 
 
 @app_commands.command(name="skip", description="Vote to skip current song")
@@ -338,24 +387,24 @@ async def skip(interaction: discord.Interaction):
 
     guild_state = get_guild_state(interaction.guild_id)
 
-    success, message = can_skip(interaction.user, guild_state)
-
     if is_dj(interaction.user):
-        await interaction.response.send_message("⏭️ Skipped by DJ!")
+        await interaction.response.send_message("⏭️ Skipped by DJ!", ephemeral=True)
         voice_client.stop()
     else:
         added, vote_message = SkipVoteManager.add_vote(interaction.user.id, guild_state)
         if not added:
             return await interaction.response.send_message(f"❌ {vote_message}", ephemeral=True)
 
-        threshold = SkipVoteManager.get_threshold(voice_client.channel)
+        threshold     = SkipVoteManager.get_threshold(voice_client.channel)
         current_votes = SkipVoteManager.get_vote_count(guild_state)
 
         if current_votes >= threshold:
-            await interaction.response.send_message(f"⏭️ Skip vote passed ({current_votes}/{threshold})!")
+            await interaction.response.send_message(f"⏭️ Skip vote passed ({current_votes}/{threshold})!", ephemeral=True)
             voice_client.stop()
         else:
-            await interaction.response.send_message(f"🗳️ Vote counted! ({current_votes}/{threshold} needed)")
+            await interaction.response.send_message(f"🗳️ Vote counted! ({current_votes}/{threshold} needed)", ephemeral=True)
+
+    await refresh_panel(interaction.guild, guild_state)
 
 
 @app_commands.command(name="forceskip", description="Skip immediately (DJ only)")
@@ -367,7 +416,7 @@ async def forceskip(interaction: discord.Interaction):
     if not voice_client or not voice_client.is_playing():
         return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
 
-    await interaction.response.send_message("⏭️ Force skipped!")
+    await interaction.response.send_message("⏭️ Force skipped!", ephemeral=True)
     voice_client.stop()
 
 
@@ -380,7 +429,8 @@ async def pause(interaction: discord.Interaction):
     voice_client.pause()
     guild_state = get_guild_state(interaction.guild_id)
     guild_state.is_paused = True
-    await interaction.response.send_message("⏸️ Paused!")
+    await interaction.response.send_message("⏸️ Paused!", ephemeral=True)
+    await refresh_panel(interaction.guild, guild_state)
 
 
 @app_commands.command(name="resume", description="Resume the music")
@@ -392,7 +442,8 @@ async def resume(interaction: discord.Interaction):
     voice_client.resume()
     guild_state = get_guild_state(interaction.guild_id)
     guild_state.is_paused = False
-    await interaction.response.send_message("▶️ Resumed!")
+    await interaction.response.send_message("▶️ Resumed!", ephemeral=True)
+    await refresh_panel(interaction.guild, guild_state)
 
 
 @app_commands.command(name="stop", description="Stop playback and clear queue (DJ only)")
@@ -407,10 +458,11 @@ async def stop(interaction: discord.Interaction):
     guild_state = get_guild_state(interaction.guild_id)
     guild_state.clear()
     voice_client.stop()
-    await interaction.response.send_message("⏹️ Stopped and cleared queue!")
+    await interaction.response.send_message("⏹️ Stopped and cleared queue!", ephemeral=True)
+    await refresh_panel(interaction.guild, guild_state)
 
 
-@app_commands.command(name="queue", description="Show the music queue")
+@app_commands.command(name="queue", description="Show the music queue (only you can see this)")
 async def show_queue(interaction: discord.Interaction):
     guild_state = get_guild_state(interaction.guild_id)
 
@@ -418,11 +470,11 @@ async def show_queue(interaction: discord.Interaction):
         return await interaction.response.send_message("❌ Queue is empty!", ephemeral=True)
 
     embed = create_queue_embed(guild_state, page=0)
-    view = QueueView(MusicCog(bot), guild_state, page=0)
-    await interaction.response.send_message(embed=embed, view=view)
+    view  = QueueView(MusicCog(bot), guild_state, page=0)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
-@app_commands.command(name="nowplaying", description="Show current song with controls")
+@app_commands.command(name="nowplaying", description="Show current song info")
 async def nowplaying(interaction: discord.Interaction):
     guild_state = get_guild_state(interaction.guild_id)
 
@@ -430,8 +482,8 @@ async def nowplaying(interaction: discord.Interaction):
         return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
 
     embed = create_now_playing_embed(guild_state.current_song, guild_state)
-    view = NowPlayingView(MusicCog(bot), timeout=None)
-    await interaction.response.send_message(embed=embed, view=view)
+    view  = NowPlayingView(MusicCog(bot), timeout=None)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 @app_commands.command(name="volume", description="Set volume (0-100)")
@@ -447,7 +499,7 @@ async def volume(interaction: discord.Interaction, level: int):
     guild_state = get_guild_state(interaction.guild_id)
     guild_state.volume = level / 100
     voice_client.source.volume = guild_state.volume
-    await interaction.response.send_message(f"🔊 Volume set to **{level}%**")
+    await interaction.response.send_message(f"🔊 Volume set to **{level}%**", ephemeral=True)
 
 
 @app_commands.command(name="remove", description="Remove a song from queue (DJ only)")
@@ -460,7 +512,8 @@ async def remove(interaction: discord.Interaction, position: int):
     removed = remove_from_queue(guild_state, position - 1)
 
     if removed:
-        await interaction.response.send_message(f"🗑️ Removed: **{removed.title}**")
+        await interaction.response.send_message(f"🗑️ Removed: **{removed.title}**", ephemeral=True)
+        await refresh_panel(interaction.guild, guild_state)
     else:
         await interaction.response.send_message("❌ Invalid position!", ephemeral=True)
 
@@ -475,7 +528,8 @@ async def move(interaction: discord.Interaction, from_position: int, to_position
     success = move_in_queue(guild_state, from_position - 1, to_position - 1)
 
     if success:
-        await interaction.response.send_message(f"✅ Moved song from #{from_position} to #{to_position}")
+        await interaction.response.send_message(f"✅ Moved song from #{from_position} to #{to_position}", ephemeral=True)
+        await refresh_panel(interaction.guild, guild_state)
     else:
         await interaction.response.send_message("❌ Invalid positions!", ephemeral=True)
 
@@ -490,7 +544,8 @@ async def shuffle(interaction: discord.Interaction):
         return await interaction.response.send_message("❌ Queue is empty!", ephemeral=True)
 
     shuffle_queue(guild_state)
-    await interaction.response.send_message("🔀 Queue shuffled!")
+    await interaction.response.send_message("🔀 Queue shuffled!", ephemeral=True)
+    await refresh_panel(interaction.guild, guild_state)
 
 
 @app_commands.command(name="clear", description="Clear the queue (DJ only)")
@@ -500,7 +555,8 @@ async def clear(interaction: discord.Interaction):
 
     guild_state = get_guild_state(interaction.guild_id)
     clear_queue(guild_state)
-    await interaction.response.send_message("🗑️ Queue cleared!")
+    await interaction.response.send_message("🗑️ Queue cleared!", ephemeral=True)
+    await refresh_panel(interaction.guild, guild_state)
 
 
 @app_commands.command(name="leave", description="Leave voice channel (DJ only)")
@@ -512,10 +568,9 @@ async def leave(interaction: discord.Interaction):
     if not voice_client:
         return await interaction.response.send_message("❌ Not in a voice channel!", ephemeral=True)
 
-    guild_state = get_guild_state(interaction.guild_id)
     cleanup_guild_state(interaction.guild_id)
     await voice_client.disconnect()
-    await interaction.response.send_message("👋 Bye!")
+    await interaction.response.send_message("👋 Bye!", ephemeral=True)
 
 
 @app_commands.command(name="help", description="Show available commands")
@@ -525,35 +580,37 @@ async def help_command(interaction: discord.Interaction):
         description="Slash commands - use `/` to see all commands",
         color=discord.Color.blue()
     )
-
     commands_list = [
-        ("/play <query>", "Play from YouTube or URL"),
-        ("/search <query>", "Search YouTube, pick from results"),
-        ("/soundcloud <query>", "Search SoundCloud, play first result"),
-        ("/soundcloud_search <query>", "Search SoundCloud, pick from results"),
-        ("/pause", "Pause playback"),
-        ("/resume", "Resume playback"),
-        ("/skip", "Vote to skip"),
-        ("/forceskip", "Skip immediately (DJ only)"),
-        ("/stop", "Stop & clear queue (DJ only)"),
-        ("/queue", "View queue"),
-        ("/nowplaying", "Current song with controls"),
-        ("/volume <0-100>", "Set volume"),
-        ("/remove <position>", "Remove song (DJ only)"),
-        ("/move <from> <to>", "Reorder queue (DJ only)"),
-        ("/shuffle", "Shuffle queue (DJ only)"),
-        ("/clear", "Clear queue (DJ only)"),
-        ("/join", "Join voice channel"),
-        ("/leave", "Leave voice channel (DJ only)"),
+        ("/play <query>",         "Play from YouTube or URL"),
+        ("/search <query>",       "Search YouTube, pick from results"),
+        ("/soundcloud <query>",   "SoundCloud – play first result"),
+        ("/soundcloud_search",    "SoundCloud – pick from results"),
+        ("/pause",                "Pause playback"),
+        ("/resume",               "Resume playback"),
+        ("/skip",                 "Vote to skip"),
+        ("/forceskip",            "Skip immediately (DJ only)"),
+        ("/stop",                 "Stop & clear queue (DJ only)"),
+        ("/queue",                "View full queue (only you see it)"),
+        ("/nowplaying",           "Current song info"),
+        ("/volume <0-100>",       "Set volume"),
+        ("/remove <pos>",         "Remove song (DJ only)"),
+        ("/move <from> <to>",     "Reorder queue (DJ only)"),
+        ("/shuffle",              "Shuffle queue (DJ only)"),
+        ("/clear",                "Clear queue (DJ only)"),
+        ("/join",                 "Join voice channel"),
+        ("/leave",                "Leave voice channel (DJ only)"),
+        ("/controlpanel",         "Toggle persistent music panel (DJ/Admin)"),
     ]
-
     for cmd, desc in commands_list:
         embed.add_field(name=cmd, value=desc, inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    await interaction.response.send_message(embed=embed)
 
+# ──────────────────────────────────────────────
+# REGISTER COMMANDS
+# ──────────────────────────────────────────────
 
-# Register slash commands
+bot.tree.add_command(controlpanel)
 bot.tree.add_command(join)
 bot.tree.add_command(play)
 bot.tree.add_command(search)
@@ -575,12 +632,15 @@ bot.tree.add_command(leave)
 bot.tree.add_command(help_command)
 
 
+# ──────────────────────────────────────────────
+# EVENTS
+# ──────────────────────────────────────────────
+
 @bot.event
 async def on_ready():
     print(f'Bot online as {bot.user}!')
     print(f'ID: {bot.user.id}')
     print('------')
-
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash commands")
@@ -591,20 +651,26 @@ async def on_ready():
         activity=discord.Activity(type=discord.ActivityType.listening, name="/help")
     )
 
+    for guild in bot.guilds:
+        info = get_panel(guild.id)
+        if info:
+            try:
+                ch  = guild.get_channel(info["channel_id"])
+                msg = await ch.fetch_message(info["message_id"])
+                guild_state = get_guild_state(guild.id)
+                view = ControlPanelView(MusicCog(bot), guild_state, timeout=None)
+                await msg.edit(view=view)
+            except Exception:
+                clear_panel(guild.id)
+
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    if member == bot.user:
-        if before.channel and not after.channel:
-            guild_state = get_guild_state(member.guild.id)
-            guild_state.clear()
-            guild_state.current_song = None
-            if guild_state.now_playing_message:
-                try:
-                    await guild_state.now_playing_message.delete()
-                except:
-                    pass
-                guild_state.now_playing_message = None
+    if member == bot.user and before.channel and not after.channel:
+        guild_state = get_guild_state(member.guild.id)
+        guild_state.clear()
+        guild_state.current_song = None
+        await refresh_panel(member.guild, guild_state)
 
 
 if __name__ == '__main__':

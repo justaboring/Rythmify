@@ -144,6 +144,7 @@ class GuildMusicState:
         self.now_playing_message = None
         self.loop_mode         = 'off'
         self.autoplay          = False
+        self.history           = []
         self.song_start_time   = None
         self.pause_start_time  = None
         self.paused_duration   = 0
@@ -210,7 +211,7 @@ def cleanup_guild_state(guild_id):
         del guild_states[guild_id]
 
 
-async def fetch_autoplay_suggestion(song, loop):
+async def fetch_autoplay_suggestion(song, loop, history):
     def _fetch():
         import ytmusicapi
         ytmusic = ytmusicapi.YTMusic()
@@ -236,11 +237,11 @@ async def fetch_autoplay_suggestion(song, loop):
             return None
             
         try:
-            watch = ytmusic.get_watch_playlist(videoId=video_id)
+            watch = ytmusic.get_watch_playlist(videoId=video_id, radio=True)
             tracks = watch.get('tracks', [])
             for track in tracks:
                 t_id = track.get('videoId')
-                if t_id and t_id != video_id:
+                if t_id and t_id != video_id and t_id not in history:
                     return f"https://www.youtube.com/watch?v={t_id}"
         except Exception as e:
             print(f"ytmusicapi error: {e}")
@@ -269,7 +270,7 @@ async def play_next_song(voice_client, guild_state, bot_loop):
         elif guild_state.autoplay and guild_state.current_song:
             print("Autoplay looking for next song...")
             try:
-                auto_song = await fetch_autoplay_suggestion(guild_state.current_song, bot_loop)
+                auto_song = await fetch_autoplay_suggestion(guild_state.current_song, bot_loop, guild_state.history)
                 if auto_song:
                     next_song = auto_song
                 else:
@@ -285,6 +286,23 @@ async def play_next_song(voice_client, guild_state, bot_loop):
 
     guild_state.current_song = next_song
     guild_state.skip_votes.clear()
+    
+    # Record history
+    v_id = next_song.data.get('id')
+    if not v_id:
+        import re
+        url = next_song.webpage_url or next_song.url or ""
+        match = re.search(r"v=([a-zA-Z0-9_-]+)", url)
+        if match:
+            v_id = match.group(1)
+        else:
+            match = re.search(r"youtu\.be/([a-zA-Z0-9_-]+)", url)
+            if match:
+                v_id = match.group(1)
+    if v_id and v_id not in guild_state.history:
+        guild_state.history.append(v_id)
+        if len(guild_state.history) > 50:
+            guild_state.history.pop(0)
 
     try:
         next_song = await YTDLSource.refresh(next_song, loop=bot_loop)

@@ -109,7 +109,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             matched         = sum(1 for w in query_words if w in title)
             relevance_score = (matched / max(len(query_words), 1)) * 25
             uploader        = (entry.get('uploader') or '').lower()
-            channel_bonus   = 10 if any(k in uploader or k in title for k in ['official', 'audio', 'topic']) else 0
+            channel_bonus   = 10 if any(k in uploader or k in title for k in ['official', 'audio', 'topic', 'lyrics', 'lyric', 'lyric video', 'official music video', 'official lyric video', 'official audio']) else 0
 
             # Penalty for music videos (usually not full song)
             mv_keywords = ['music video', 'official video', 'official mv', '(mv)', '| mv', 'video clip', 'videoclip']

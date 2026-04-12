@@ -100,55 +100,8 @@ class ControlPanelView(discord.ui.View):
             elif getattr(child, 'custom_id', None) == "cp_autoplay":
                 child.style = discord.ButtonStyle.success if getattr(self.guild_state, 'autoplay', False) else discord.ButtonStyle.secondary
 
-    @discord.ui.button(emoji="🔉", label="Vol -",    style=discord.ButtonStyle.secondary, custom_id="cp_vol_down",  row=0)
-    async def vol_down_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.music_cog.volume_down_callback(interaction)
-
-    @discord.ui.button(emoji="⏮️", label="Prev",     style=discord.ButtonStyle.primary, custom_id="cp_prev_song", row=0)
-    async def prev_song_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("⏮️ No previous song support yet.", ephemeral=True)
-
-    @discord.ui.button(emoji="⏸️", label="Pause",    style=discord.ButtonStyle.primary,   custom_id="cp_pause",     row=0)
-    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.music_cog.pause_callback(interaction)
-        self._update_button_states()
-        await self._refresh_panel(interaction)
-
-    @discord.ui.button(emoji="⏭️", label="Skip",     style=discord.ButtonStyle.primary, custom_id="cp_skip",      row=0)
-    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.music_cog.skip_callback(interaction)
-
-    @discord.ui.button(emoji="🔊", label="Vol +",    style=discord.ButtonStyle.secondary, custom_id="cp_vol_up",    row=0)
-    async def vol_up_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.music_cog.volume_up_callback(interaction)
-
-    @discord.ui.button(emoji="🔀", label="Shuffle",  style=discord.ButtonStyle.secondary, custom_id="cp_shuffle",  row=1)
-    async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.music_cog.shuffle_callback(interaction)
-        await self._refresh_panel(interaction)
-
-    @discord.ui.button(emoji="🔁", label="AutoPlay", style=discord.ButtonStyle.secondary, custom_id="cp_autoplay", row=1)
-    async def autoplay_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.guild_state.autoplay = not self.guild_state.autoplay
-        self._update_button_states()
-        state_str = "ON" if self.guild_state.autoplay else "OFF"
-        await interaction.response.send_message(f"🔁 AutoPlay is now **{state_str}**", ephemeral=True)
-        await self._refresh_panel(interaction)
-
-    @discord.ui.button(emoji="🤍", label="Like",     style=discord.ButtonStyle.secondary, custom_id="cp_like",     row=1)
-    async def like_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("🤍 Favorited!", ephemeral=True)
-
-    @discord.ui.button(emoji="⏹️", label="Stop",    style=discord.ButtonStyle.danger,    custom_id="cp_stop",     row=1)
-    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.music_cog.stop_callback(interaction)
-        await self._refresh_panel(interaction)
-
-    @discord.ui.button(emoji="📊", label="Stats",    style=discord.ButtonStyle.secondary, custom_id="cp_dash",     row=1)
-    async def dashboard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.music_cog.dashboard_callback(interaction)
-
-    async def _refresh_panel(self, interaction: discord.Interaction):
+    async def _do_refresh(self, interaction: discord.Interaction):
+        """Edit the panel message in-place. Safe to call after any interaction response."""
         self._update_button_states()
         embed = create_control_panel_embed(self.guild_state)
         try:
@@ -157,6 +110,124 @@ class ControlPanelView(discord.ui.View):
                 await msg.edit(embed=embed, view=self)
         except Exception:
             pass
+
+    # ── Row 0 ──────────────────────────────────────────────────────
+
+    @discord.ui.button(emoji="🔉", label="Vol -", style=discord.ButtonStyle.secondary, custom_id="cp_vol_down", row=0)
+    async def vol_down_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        voice_client = interaction.guild.voice_client
+        if not voice_client or not voice_client.source:
+            return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
+        guild_state = self.guild_state
+        new_vol = max(0.0, guild_state.volume - 0.1)
+        guild_state.volume = new_vol
+        voice_client.source.volume = new_vol
+        await interaction.response.send_message(f"🔉 Volume: {int(new_vol * 100)}%", ephemeral=True)
+        await self._do_refresh(interaction)
+
+    @discord.ui.button(emoji="⏮️", label="Prev", style=discord.ButtonStyle.primary, custom_id="cp_prev_song", row=0)
+    async def prev_song_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("⏮️ No previous song support yet.", ephemeral=True)
+
+    @discord.ui.button(emoji="⏸️", label="Pause", style=discord.ButtonStyle.primary, custom_id="cp_pause", row=0)
+    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        voice_client = interaction.guild.voice_client
+        guild_state  = self.guild_state
+        if not voice_client or (not voice_client.is_playing() and not voice_client.is_paused()):
+            return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
+        if voice_client.is_paused():
+            voice_client.resume()
+            guild_state.is_paused = False
+            await interaction.response.send_message("▶️ Resumed!", ephemeral=True)
+        else:
+            voice_client.pause()
+            guild_state.is_paused = True
+            await interaction.response.send_message("⏸️ Paused!", ephemeral=True)
+        await self._do_refresh(interaction)
+
+    @discord.ui.button(emoji="⏭️", label="Skip", style=discord.ButtonStyle.primary, custom_id="cp_skip", row=0)
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        from admin_module import is_dj, SkipVoteManager
+        voice_client = interaction.guild.voice_client
+        if not voice_client or not voice_client.is_playing():
+            return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
+        guild_state = self.guild_state
+        if is_dj(interaction.user):
+            await interaction.response.send_message("⏭️ Skipped by DJ!", ephemeral=True)
+            voice_client.stop()
+        else:
+            added, vote_message = SkipVoteManager.add_vote(interaction.user.id, guild_state)
+            if not added:
+                return await interaction.response.send_message(f"❌ {vote_message}", ephemeral=True)
+            threshold     = SkipVoteManager.get_threshold(voice_client.channel)
+            current_votes = SkipVoteManager.get_vote_count(guild_state)
+            if current_votes >= threshold:
+                await interaction.response.send_message(f"⏭️ Skip vote passed ({current_votes}/{threshold})!", ephemeral=True)
+                voice_client.stop()
+            else:
+                await interaction.response.send_message(f"🗳️ Vote counted! ({current_votes}/{threshold} needed)", ephemeral=True)
+        # Panel will be refreshed by play_next_song → track_update event
+
+    @discord.ui.button(emoji="🔊", label="Vol +", style=discord.ButtonStyle.secondary, custom_id="cp_vol_up", row=0)
+    async def vol_up_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        voice_client = interaction.guild.voice_client
+        if not voice_client or not voice_client.source:
+            return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
+        guild_state = self.guild_state
+        new_vol = min(1.0, guild_state.volume + 0.1)
+        guild_state.volume = new_vol
+        voice_client.source.volume = new_vol
+        await interaction.response.send_message(f"🔊 Volume: {int(new_vol * 100)}%", ephemeral=True)
+        await self._do_refresh(interaction)
+
+    # ── Row 1 ──────────────────────────────────────────────────────
+
+    @discord.ui.button(emoji="🔀", label="Shuffle", style=discord.ButtonStyle.secondary, custom_id="cp_shuffle", row=1)
+    async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        from admin_module import is_dj
+        guild_state = self.guild_state
+        if not is_dj(interaction.user):
+            return await interaction.response.send_message("❌ DJ only command!", ephemeral=True)
+        if not guild_state.queue:
+            return await interaction.response.send_message("❌ Queue is empty!", ephemeral=True)
+        import random
+        random.shuffle(guild_state.queue)
+        await interaction.response.send_message("🔀 Queue shuffled!", ephemeral=True)
+        await self._do_refresh(interaction)
+
+    @discord.ui.button(emoji="🔁", label="AutoPlay", style=discord.ButtonStyle.secondary, custom_id="cp_autoplay", row=1)
+    async def autoplay_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.guild_state.autoplay = not self.guild_state.autoplay
+        state_str = "ON" if self.guild_state.autoplay else "OFF"
+        await interaction.response.send_message(f"🔁 AutoPlay is now **{state_str}**", ephemeral=True)
+        await self._do_refresh(interaction)
+
+    @discord.ui.button(emoji="🤍", label="Like", style=discord.ButtonStyle.secondary, custom_id="cp_like", row=1)
+    async def like_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_state = self.guild_state
+        if guild_state.current_song:
+            await interaction.response.send_message(f"🤍 Liked **{guild_state.current_song.title[:60]}**!", ephemeral=True)
+        else:
+            await interaction.response.send_message("🤍 Nothing to like right now.", ephemeral=True)
+
+    @discord.ui.button(emoji="⏹️", label="Stop", style=discord.ButtonStyle.danger, custom_id="cp_stop", row=1)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        from admin_module import is_dj
+        if not is_dj(interaction.user):
+            return await interaction.response.send_message("❌ DJ only command!", ephemeral=True)
+        voice_client = interaction.guild.voice_client
+        if not voice_client:
+            return await interaction.response.send_message("❌ Not in a voice channel!", ephemeral=True)
+        guild_state = self.guild_state
+        guild_state.clear()
+        guild_state.current_song = None
+        voice_client.stop()
+        await interaction.response.send_message("⏹️ Stopped and cleared queue!", ephemeral=True)
+        await self._do_refresh(interaction)
+
+    @discord.ui.button(emoji="📊", label="Stats", style=discord.ButtonStyle.secondary, custom_id="cp_dash", row=1)
+    async def dashboard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.music_cog.dashboard_callback(interaction)
 
     def update_pause_button(self, is_paused: bool):
         pass

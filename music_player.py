@@ -237,12 +237,41 @@ async def fetch_autoplay_suggestion(song, loop, history):
             return None
             
         try:
-            watch = ytmusic.get_watch_playlist(videoId=video_id, radio=True)
+            import random
+            # Widen the radio generation to 50 tracks
+            watch = ytmusic.get_watch_playlist(videoId=video_id, radio=True, limit=50)
             tracks = watch.get('tracks', [])
+            
+            current_artists = set()
+            for t in tracks:
+                if t.get('videoId') == video_id:
+                    for a in t.get('artists', []):
+                        if a.get('name'): current_artists.add(a.get('name'))
+                    break
+                    
+            candidates = []
             for track in tracks:
                 t_id = track.get('videoId')
-                if t_id and t_id != video_id and t_id not in history:
-                    return f"https://www.youtube.com/watch?v={t_id}"
+                if not t_id or t_id == video_id or t_id in history:
+                    continue
+                candidates.append(track)
+                
+            if candidates:
+                diff_artist_candidates = []
+                for t in candidates:
+                    t_artists = set(a.get('name') for a in t.get('artists', []) if a.get('name'))
+                    if not current_artists.intersection(t_artists):
+                        diff_artist_candidates.append(t)
+                
+                # Widen the randomness scope to top 25-30 songs to give much more variety
+                if diff_artist_candidates and random.random() < 0.85:
+                    pool = diff_artist_candidates[:30]
+                else:
+                    pool = candidates[:30]
+                    
+                chosen = random.choice(pool)
+                return f"https://www.youtube.com/watch?v={chosen['videoId']}"
+                
         except Exception as e:
             print(f"ytmusicapi error: {e}")
         return None
@@ -275,13 +304,19 @@ async def play_next_song(voice_client, guild_state, bot_loop):
                     next_song = auto_song
                 else:
                     guild_state.current_song = None
+                    if getattr(voice_client, 'client', None):
+                        voice_client.client.dispatch('track_update', voice_client.guild, guild_state)
                     return
             except Exception as e:
                 print(f"Autoplay failed: {e}")
                 guild_state.current_song = None
+                if getattr(voice_client, 'client', None):
+                    voice_client.client.dispatch('track_update', voice_client.guild, guild_state)
                 return
         else:
             guild_state.current_song = None
+            if getattr(voice_client, 'client', None):
+                voice_client.client.dispatch('track_update', voice_client.guild, guild_state)
             return
 
     guild_state.current_song = next_song
@@ -346,6 +381,9 @@ async def play_next_song(voice_client, guild_state, bot_loop):
         record_play(guild_state.guild_id, next_song.title)
 
         print(f"Now playing: {next_song.title}")
+        
+        if getattr(voice_client, 'client', None):
+            voice_client.client.dispatch('track_update', voice_client.guild, guild_state)
 
     except Exception as e:
         print(f"Error starting playback: {e}")

@@ -637,6 +637,10 @@ bot.tree.add_command(help_command)
 # ──────────────────────────────────────────────
 
 @bot.event
+async def on_track_update(guild, guild_state):
+    await refresh_panel(guild, guild_state)
+
+@bot.event
 async def on_ready():
     print(f'Bot online as {bot.user}!')
     print(f'ID: {bot.user.id}')

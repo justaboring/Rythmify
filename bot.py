@@ -18,6 +18,11 @@ from ui_components import (
 )
 from panel_store import get_panel, set_panel, clear_panel
 from utils import parse_spotify_url, is_url
+from ytmusic_module import (
+    search_songs, search_videos, get_artist_radio,
+    get_song_radio, get_mood_playlists, get_mood_tracks,
+    get_playlist_tracks, track_to_source_data
+)
 
 Config.setup_ssl()
 Config.validate()
@@ -582,6 +587,11 @@ async def help_command(interaction: discord.Interaction):
     )
     commands_list = [
         ("/play <query>",         "Play from YouTube or URL"),
+        ("/ytmusic <query>",      "Play from YouTube Music (more accurate)"),
+        ("/ytmusic_search <q>",   "Search YouTube Music, pick from results"),
+        ("/artist <name>",        "Artist radio from YouTube Music"),
+        ("/mood <mood>",          "Play by mood/genre (chill, party, sad...)"),
+        ("/ytplaylist <id>",      "Load public YT Music playlist"),
         ("/search <query>",       "Search YouTube, pick from results"),
         ("/soundcloud <query>",   "SoundCloud – play first result"),
         ("/soundcloud_search",    "SoundCloud – pick from results"),
@@ -607,9 +617,274 @@ async def help_command(interaction: discord.Interaction):
 
 
 # ──────────────────────────────────────────────
+# YT MUSIC COMMANDS
+# ──────────────────────────────────────────────
+
+@app_commands.command(name="ytmusic", description="Play from YouTube Music (more accurate than /play)")
+@app_commands.describe(query="Song name or artist")
+async def ytmusic_play(interaction: discord.Interaction, query: str):
+    await interaction.response.defer(ephemeral=True)
+
+    voice_client = await ensure_voice(interaction)
+    if not voice_client:
+        return
+
+    guild_state = get_guild_state(interaction.guild_id)
+
+    try:
+        tracks = await asyncio.get_event_loop().run_in_executor(None, search_songs, query, 1)
+        if not tracks:
+            # fallback to video search
+            tracks = await asyncio.get_event_loop().run_in_executor(None, search_videos, query, 1)
+        if not tracks:
+            return await interaction.followup.send("❌ No results found on YouTube Music!", ephemeral=True)
+
+        track = tracks[0]
+        source = await YTDLSource.from_url(track["url"], loop=bot.loop, stream=True, requester=interaction.user)
+
+        already_playing = voice_client.is_playing() or voice_client.is_paused()
+
+        if not guild_state.add_to_queue(source):
+            return await interaction.followup.send("❌ Queue is full!", ephemeral=True)
+
+        embed = create_added_embed(source, len(guild_state.queue))
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        if not already_playing:
+            await play_next_song(voice_client, guild_state, bot.loop)
+
+        await refresh_panel(interaction.guild, guild_state)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+
+@app_commands.command(name="ytmusic_search", description="Search YouTube Music and pick from results")
+@app_commands.describe(query="Song name or artist")
+async def ytmusic_search(interaction: discord.Interaction, query: str):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        tracks = await asyncio.get_event_loop().run_in_executor(None, search_songs, query, 5)
+        if not tracks:
+            tracks = await asyncio.get_event_loop().run_in_executor(None, search_videos, query, 5)
+        if not tracks:
+            return await interaction.followup.send("❌ No results found!", ephemeral=True)
+
+        # Convert to SongSelectView compatible format
+        options = []
+        for i, t in enumerate(tracks[:5]):
+            label = t["title"][:50]
+            desc = f"by {t['artist'][:50]}" if t["artist"] else "Unknown artist"
+            options.append(discord.SelectOption(label=label, description=desc, value=str(i), emoji="🎵"))
+
+        class YTMusicSelectView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60)
+                select = discord.ui.Select(placeholder="🎵 Choose a song…", options=options)
+                select.callback = self.select_callback
+                self.add_item(select)
+
+            async def select_callback(self, inter: discord.Interaction):
+                idx = int(inter.data["values"][0])
+                track = tracks[idx]
+                await inter.response.defer(ephemeral=True)
+
+                vc = await ensure_voice(inter)
+                if not vc:
+                    return
+
+                gs = get_guild_state(inter.guild_id)
+                try:
+                    source = await YTDLSource.from_url(track["url"], loop=bot.loop, stream=True, requester=inter.user)
+                    already = vc.is_playing() or vc.is_paused()
+                    if not gs.add_to_queue(source):
+                        return await inter.followup.send("❌ Queue is full!", ephemeral=True)
+                    embed = create_added_embed(source, len(gs.queue))
+                    await inter.followup.send(embed=embed, ephemeral=True)
+                    if not already:
+                        await play_next_song(vc, gs, bot.loop)
+                    await refresh_panel(inter.guild, gs)
+                except Exception as e:
+                    await inter.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+        await interaction.followup.send("🎵 Select a song:", view=YTMusicSelectView(), ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+
+@app_commands.command(name="artist", description="Play artist radio from YouTube Music")
+@app_commands.describe(name="Artist name")
+async def artist_radio(interaction: discord.Interaction, name: str):
+    await interaction.response.defer(ephemeral=True)
+
+    voice_client = await ensure_voice(interaction)
+    if not voice_client:
+        return
+
+    guild_state = get_guild_state(interaction.guild_id)
+
+    try:
+        tracks = await asyncio.get_event_loop().run_in_executor(None, get_artist_radio, name, 20)
+        if not tracks:
+            return await interaction.followup.send(f"❌ No artist radio found for **{name}**!", ephemeral=True)
+
+        added = 0
+        for track in tracks:
+            if len(guild_state.queue) >= 20:
+                break
+            try:
+                source = await YTDLSource.from_url(track["url"], loop=bot.loop, stream=True, requester=interaction.user)
+                if guild_state.add_to_queue(source):
+                    added += 1
+            except Exception:
+                continue
+
+        if added == 0:
+            return await interaction.followup.send("❌ Failed to load tracks!", ephemeral=True)
+
+        already_playing = voice_client.is_playing() or voice_client.is_paused()
+        await interaction.followup.send(f"📻 Added **{added}** songs from **{name}** radio!", ephemeral=True)
+
+        if not already_playing:
+            await play_next_song(voice_client, guild_state, bot.loop)
+
+        await refresh_panel(interaction.guild, guild_state)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+
+@app_commands.command(name="mood", description="Play music by mood/genre from YouTube Music")
+@app_commands.describe(mood="Mood or genre (e.g. chill, workout, sad, party, focus)")
+async def mood_play(interaction: discord.Interaction, mood: str):
+    await interaction.response.defer(ephemeral=True)
+
+    voice_client = await ensure_voice(interaction)
+    if not voice_client:
+        return
+
+    guild_state = get_guild_state(interaction.guild_id)
+
+    try:
+        # Get mood categories and find matching one
+        moods = await asyncio.get_event_loop().run_in_executor(None, get_mood_playlists)
+
+        matched_params = None
+        mood_lower = mood.lower()
+
+        for category, items in moods.items():
+            for item in items:
+                title = item.get("title", "").lower()
+                if mood_lower in title or title in mood_lower:
+                    matched_params = item.get("params")
+                    break
+            if matched_params:
+                break
+
+        if not matched_params:
+            # List available moods
+            all_moods = []
+            for category, items in moods.items():
+                for item in items:
+                    all_moods.append(item.get("title", ""))
+            mood_list = ", ".join(all_moods[:20])
+            return await interaction.followup.send(
+                f"❌ Mood **{mood}** not found!\nAvailable: {mood_list}",
+                ephemeral=True
+            )
+
+        tracks = await asyncio.get_event_loop().run_in_executor(None, get_mood_tracks, matched_params, 15)
+        if not tracks:
+            return await interaction.followup.send("❌ No tracks found for this mood!", ephemeral=True)
+
+        added = 0
+        for track in tracks:
+            if len(guild_state.queue) >= 15:
+                break
+            try:
+                source = await YTDLSource.from_url(track["url"], loop=bot.loop, stream=True, requester=interaction.user)
+                if guild_state.add_to_queue(source):
+                    added += 1
+            except Exception:
+                continue
+
+        if added == 0:
+            return await interaction.followup.send("❌ Failed to load tracks!", ephemeral=True)
+
+        already_playing = voice_client.is_playing() or voice_client.is_paused()
+        await interaction.followup.send(f"🎭 Added **{added}** songs for mood: **{mood}**!", ephemeral=True)
+
+        if not already_playing:
+            await play_next_song(voice_client, guild_state, bot.loop)
+
+        await refresh_panel(interaction.guild, guild_state)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+
+@app_commands.command(name="ytplaylist", description="Load a public YouTube Music playlist")
+@app_commands.describe(playlist_id="Playlist ID (from URL: ?list=XXXX)")
+async def ytplaylist(interaction: discord.Interaction, playlist_id: str):
+    await interaction.response.defer(ephemeral=True)
+
+    voice_client = await ensure_voice(interaction)
+    if not voice_client:
+        return
+
+    guild_state = get_guild_state(interaction.guild_id)
+
+    # Extract ID from URL if full URL given
+    if "list=" in playlist_id:
+        import re
+        match = re.search(r"list=([a-zA-Z0-9_-]+)", playlist_id)
+        if match:
+            playlist_id = match.group(1)
+
+    try:
+        tracks = await asyncio.get_event_loop().run_in_executor(None, get_playlist_tracks, playlist_id, 50)
+        if not tracks:
+            return await interaction.followup.send("❌ Playlist not found or empty!", ephemeral=True)
+
+        await interaction.followup.send(f"⏳ Loading {len(tracks)} tracks...", ephemeral=True)
+
+        added = 0
+        for track in tracks:
+            if len(guild_state.queue) >= Config.MAX_QUEUE_SIZE:
+                break
+            try:
+                source = await YTDLSource.from_url(track["url"], loop=bot.loop, stream=True, requester=interaction.user)
+                if guild_state.add_to_queue(source):
+                    added += 1
+            except Exception:
+                continue
+
+        if added == 0:
+            return await interaction.followup.send("❌ Failed to load any tracks!", ephemeral=True)
+
+        already_playing = voice_client.is_playing() or voice_client.is_paused()
+        await interaction.channel.send(f"📋 Loaded **{added}** songs from playlist!", delete_after=10)
+
+        if not already_playing:
+            await play_next_song(voice_client, guild_state, bot.loop)
+
+        await refresh_panel(interaction.guild, guild_state)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+
+# ──────────────────────────────────────────────
 # REGISTER COMMANDS
 # ──────────────────────────────────────────────
 
+bot.tree.add_command(ytmusic_play)
+bot.tree.add_command(ytmusic_search)
+bot.tree.add_command(artist_radio)
+bot.tree.add_command(mood_play)
+bot.tree.add_command(ytplaylist)
 bot.tree.add_command(controlpanel)
 bot.tree.add_command(join)
 bot.tree.add_command(play)

@@ -31,16 +31,7 @@ class Config:
         'legacyserverconnect': True,
         'force-ipv4': True,
         'cachedir': False,
-        # Selalu baca cookie fresh dari Firefox — tidak perlu update manual
-        'cookiesfrombrowser': ('firefox',),
-        'extractor_args': {
-            'youtube': {
-                # web + cookies yang valid: YouTube tidak trigger JS challenge
-                # karena session sudah authenticated
-                # Hapus player_skip agar flow auth berjalan normal (no Deno needed)
-                'player_client': ['tv', 'web'],
-            }
-        }
+        'js_runtimes': {'deno': {'path': r'C:\Users\TinKan\AppData\Local\Microsoft\WinGet\Packages\DenoLand.Deno_Microsoft.Winget.Source_8wekyb3d8bbwe\deno.exe'}},
     }
 
     FFMPEG_OPTIONS = {

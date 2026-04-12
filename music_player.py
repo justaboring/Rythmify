@@ -3,6 +3,18 @@ import discord
 import yt_dlp as youtube_dl
 from config import Config
 from utils import format_duration
+import concurrent.futures
+
+# ThreadPoolExecutor: threads share memory → exception/traceback tidak perlu di-pickle
+# (ProcessPoolExecutor dulu dipakai untuk Deno, tapi sekarang Deno sudah di-skip)
+process_pool = concurrent.futures.ThreadPoolExecutor()
+
+def _extract_info_sync(url, download=False):
+    """Runs yt-dlp extraction synchronously in a separate process."""
+    import yt_dlp
+    from config import Config
+    ytdl = yt_dlp.YoutubeDL(Config.YTDL_FORMAT_OPTIONS)
+    return ytdl.extract_info(url, download=download)
 
 ytdl = youtube_dl.YoutubeDL(Config.YTDL_FORMAT_OPTIONS)
 
@@ -23,8 +35,10 @@ class YTDLSource(discord.PCMVolumeTransformer):
     async def from_url(cls, url, *, loop=None, stream=True, requester=None):
         loop = loop or asyncio.get_event_loop()
         data = await loop.run_in_executor(
-            None,
-            lambda: ytdl.extract_info(url, download=not stream)
+            process_pool,
+            _extract_info_sync,
+            url,
+            not stream
         )
 
         if 'entries' in data:
@@ -89,8 +103,10 @@ class YTDLSource(discord.PCMVolumeTransformer):
         loop = loop or asyncio.get_event_loop()
 
         raw = await loop.run_in_executor(
-            None,
-            lambda: ytdl.extract_info(f"ytsearch5:{query}", download=False)
+            process_pool,
+            _extract_info_sync,
+            f"ytsearch5:{query}",
+            False
         )
         entries = [e for e in (raw.get('entries') or []) if e]
         if not entries:
@@ -107,9 +123,19 @@ class YTDLSource(discord.PCMVolumeTransformer):
         if not webpage_url:
             return song
 
+        # Tutup ffmpeg lama sebelum buat yang baru
+        # Tanpa ini akan ada 2 proses ffmpeg berebut stream yang sama
+        try:
+            if hasattr(song, 'original') and song.original:
+                song.original.cleanup()
+        except Exception:
+            pass
+
         data = await loop.run_in_executor(
-            None,
-            lambda: ytdl.extract_info(webpage_url, download=False)
+            process_pool,
+            _extract_info_sync,
+            webpage_url,
+            False
         )
 
         if 'entries' in data:

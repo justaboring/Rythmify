@@ -328,12 +328,12 @@ async def search(interaction: discord.Interaction, query: str):
     await interaction.response.defer(ephemeral=True)
 
     try:
-        import yt_dlp as youtube_dl
-        ytdl = youtube_dl.YoutubeDL(Config.YTDL_FORMAT_OPTIONS)
-
+        from music_player import process_pool, _extract_info_sync
         data = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: ytdl.extract_info(f"ytsearch5:{query}", download=False)
+            process_pool,
+            _extract_info_sync,
+            f"ytsearch5:{query}",
+            False
         )
 
         sources = []

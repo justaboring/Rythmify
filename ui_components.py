@@ -89,25 +89,36 @@ class ControlPanelView(discord.ui.View):
         self.guild_state = guild_state
         self.page        = page
         self.per_page    = 8
+        self._update_button_states()
 
-    @discord.ui.button(emoji="🔉", label="Down",     style=discord.ButtonStyle.secondary, custom_id="cp_vol_down",  row=0)
+    def _update_button_states(self):
+        for child in self.children:
+            if getattr(child, 'custom_id', None) == "cp_pause":
+                child.label = "Resume" if self.guild_state.is_paused else "Pause"
+                child.emoji = discord.PartialEmoji(name="▶️") if self.guild_state.is_paused else discord.PartialEmoji(name="⏸️")
+                child.style = discord.ButtonStyle.secondary if self.guild_state.is_paused else discord.ButtonStyle.primary
+            elif getattr(child, 'custom_id', None) == "cp_autoplay":
+                child.style = discord.ButtonStyle.success if getattr(self.guild_state, 'autoplay', False) else discord.ButtonStyle.secondary
+
+    @discord.ui.button(emoji="🔉", label="Vol -",    style=discord.ButtonStyle.secondary, custom_id="cp_vol_down",  row=0)
     async def vol_down_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.volume_down_callback(interaction)
 
-    @discord.ui.button(emoji="⏮️", label="Previous", style=discord.ButtonStyle.secondary, custom_id="cp_prev_song", row=0)
+    @discord.ui.button(emoji="⏮️", label="Prev",     style=discord.ButtonStyle.primary, custom_id="cp_prev_song", row=0)
     async def prev_song_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("⏮️ No previous song support yet.", ephemeral=True)
 
-    @discord.ui.button(emoji="⏸️", label="Pause",    style=discord.ButtonStyle.success,   custom_id="cp_pause",     row=0)
+    @discord.ui.button(emoji="⏸️", label="Pause",    style=discord.ButtonStyle.primary,   custom_id="cp_pause",     row=0)
     async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.pause_callback(interaction)
+        self._update_button_states()
         await self._refresh_panel(interaction)
 
-    @discord.ui.button(emoji="⏭️", label="Skip",     style=discord.ButtonStyle.secondary, custom_id="cp_skip",      row=0)
+    @discord.ui.button(emoji="⏭️", label="Skip",     style=discord.ButtonStyle.primary, custom_id="cp_skip",      row=0)
     async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.skip_callback(interaction)
 
-    @discord.ui.button(emoji="🔊", label="Up",       style=discord.ButtonStyle.secondary, custom_id="cp_vol_up",    row=0)
+    @discord.ui.button(emoji="🔊", label="Vol +",    style=discord.ButtonStyle.secondary, custom_id="cp_vol_up",    row=0)
     async def vol_up_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.volume_up_callback(interaction)
 
@@ -119,24 +130,26 @@ class ControlPanelView(discord.ui.View):
     @discord.ui.button(emoji="🔁", label="AutoPlay", style=discord.ButtonStyle.secondary, custom_id="cp_autoplay", row=1)
     async def autoplay_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.guild_state.autoplay = not self.guild_state.autoplay
+        self._update_button_states()
         state_str = "ON" if self.guild_state.autoplay else "OFF"
         await interaction.response.send_message(f"🔁 AutoPlay is now **{state_str}**", ephemeral=True)
         await self._refresh_panel(interaction)
 
     @discord.ui.button(emoji="🤍", label="Like",     style=discord.ButtonStyle.secondary, custom_id="cp_like",     row=1)
     async def like_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("🤍 Like saved!", ephemeral=True)
+        await interaction.response.send_message("🤍 Favorited!", ephemeral=True)
 
     @discord.ui.button(emoji="⏹️", label="Stop",    style=discord.ButtonStyle.danger,    custom_id="cp_stop",     row=1)
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.stop_callback(interaction)
         await self._refresh_panel(interaction)
 
-    @discord.ui.button(emoji="📊", label="Dashboard",style=discord.ButtonStyle.secondary, custom_id="cp_dash",     row=1)
+    @discord.ui.button(emoji="📊", label="Stats",    style=discord.ButtonStyle.secondary, custom_id="cp_dash",     row=1)
     async def dashboard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.dashboard_callback(interaction)
 
     async def _refresh_panel(self, interaction: discord.Interaction):
+        self._update_button_states()
         embed = create_control_panel_embed(self.guild_state)
         try:
             msg = interaction.message
@@ -146,11 +159,7 @@ class ControlPanelView(discord.ui.View):
             pass
 
     def update_pause_button(self, is_paused: bool):
-        for child in self.children:
-            if getattr(child, 'custom_id', None) == "cp_pause":
-                child.label = "Resume" if is_paused else "Pause"
-                child.emoji = discord.PartialEmoji(name="▶️") if is_paused else discord.PartialEmoji(name="⏸️")
-                child.style = discord.ButtonStyle.success
+        pass
 
 
 NowPlayingView = ControlPanelView
@@ -203,7 +212,7 @@ def create_control_panel_embed(guild_state) -> discord.Embed:
 
     embed = discord.Embed(description=description, color=Colors.TEAL)
     if song.thumbnail:
-        embed.set_thumbnail(url=song.thumbnail)
+        embed.set_image(url=song.thumbnail)
     embed.set_footer(text="Controller System")
     return embed
 

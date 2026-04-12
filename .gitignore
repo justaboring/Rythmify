@@ -16,3 +16,29 @@ ENV/
 
 # Logs
 *.log
+
+# Cache
+.cache/
+*.cache
+
+# yt-dlp
+*.part
+*.ytdl
+*.temp.*
+
+# Stats & Panel store
+stats_store.json
+panel_store.json
+
+# Downloaded media
+*.mp4
+*.webm
+*.mp3
+*.m4a
+
+# VS Code
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store

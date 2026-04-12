@@ -992,11 +992,15 @@ async def on_message(message: discord.Message):
 
         if not guild_state.add_to_queue(source):
             await loading_msg.edit(content=f"❌ Queue is full!")
+            await asyncio.sleep(5)
+            await loading_msg.delete()
             return
 
         pos = len(guild_state.queue)
         dur = source.format_duration() if source.duration else "?:??"
         await loading_msg.edit(content=f"✅ **{source.title[:60]}** — `{dur}` added to queue #{pos} by {message.author.mention}")
+        await asyncio.sleep(5)
+        await loading_msg.delete()
 
         if not already_playing:
             await play_next_song(voice_client, guild_state, bot.loop)
@@ -1005,6 +1009,8 @@ async def on_message(message: discord.Message):
 
     except Exception as e:
         await loading_msg.edit(content=f"❌ Error: {str(e)[:100]}")
+        await asyncio.sleep(5)
+        await loading_msg.delete()
 
     await bot.process_commands(message)
 

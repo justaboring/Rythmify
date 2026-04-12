@@ -20,7 +20,7 @@ from panel_store import get_panel, set_panel, clear_panel
 from utils import parse_spotify_url, is_url
 
 Config.setup_ssl()
-Config.validate()
+ZDConfig.validate()
 
 intents = discord.Intents.default()
 intents.message_content = True

@@ -112,7 +112,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             channel_bonus   = 10 if any(k in uploader or k in title for k in ['official', 'audio', 'topic']) else 0
 
             # Penalty for music videos (usually not full song)
-            mv_keywords = ['music video', 'official video', 'official mv', '(mv)', '| mv', 'video clip', 'videoclip', 'lyrics', 'lyric']
+            mv_keywords = ['music video', 'official video', 'official mv', '(mv)', '| mv', 'video clip', 'videoclip', 'lyric video', 'official lyric', 'lyrics video', 'lirik', 'liric']
             mv_penalty  = -20 if any(k in title for k in mv_keywords) else 0
 
             score = view_score + relevance_score + channel_bonus + mv_penalty

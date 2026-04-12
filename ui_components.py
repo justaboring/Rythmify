@@ -99,6 +99,13 @@ class ControlPanelView(discord.ui.View):
                 child.style = discord.ButtonStyle.secondary if self.guild_state.is_paused else discord.ButtonStyle.primary
             elif getattr(child, 'custom_id', None) == "cp_autoplay":
                 child.style = discord.ButtonStyle.success if getattr(self.guild_state, 'autoplay', False) else discord.ButtonStyle.secondary
+            elif getattr(child, 'custom_id', None) == "cp_loop":
+                loop_mode = getattr(self.guild_state, 'loop_mode', 'off')
+                icons = {"off": "➡️", "one": "🔂", "all": "🔁"}
+                labels = {"off": "Loop", "one": "Loop: One", "all": "Loop: All"}
+                child.emoji = discord.PartialEmoji(name=icons[loop_mode])
+                child.label = labels[loop_mode]
+                child.style = discord.ButtonStyle.success if loop_mode != 'off' else discord.ButtonStyle.secondary
 
     async def _do_refresh(self, interaction: discord.Interaction):
         """Edit the panel message in-place. Safe to call after any interaction response."""
@@ -225,7 +232,19 @@ class ControlPanelView(discord.ui.View):
         await interaction.response.send_message("⏹️ Stopped and cleared queue!", ephemeral=True)
         await self._do_refresh(interaction)
 
-    @discord.ui.button(emoji="📊", label="Stats", style=discord.ButtonStyle.secondary, custom_id="cp_dash", row=1)
+    @discord.ui.button(emoji="🔂", label="Loop", style=discord.ButtonStyle.secondary, custom_id="cp_loop", row=1)
+    async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_state = self.guild_state
+        modes = ['off', 'one', 'all']
+        current = getattr(guild_state, 'loop_mode', 'off')
+        next_mode = modes[(modes.index(current) + 1) % len(modes)]
+        guild_state.loop_mode = next_mode
+        icons = {"off": "➡️", "one": "🔂", "all": "🔁"}
+        labels = {"off": "Loop Off", "one": "Loop One", "all": "Loop All"}
+        await interaction.response.send_message(f"{icons[next_mode]} **{labels[next_mode]}**", ephemeral=True)
+        await self._do_refresh(interaction)
+
+    @discord.ui.button(emoji="📊", label="Stats", style=discord.ButtonStyle.secondary, custom_id="cp_dash", row=2)
     async def dashboard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.dashboard_callback(interaction)
 
@@ -235,7 +254,7 @@ class ControlPanelView(discord.ui.View):
 
 NowPlayingView = ControlPanelView
 
-BANNER_URL = "https://i.imgur.com/4M7IWwP.png"
+BANNER_URL = "https://i.imgur.com/bchA51H.png"
 
 
 def create_control_panel_embed(guild_state) -> discord.Embed:
@@ -280,6 +299,12 @@ def create_control_panel_embed(guild_state) -> discord.Embed:
         )
     if getattr(guild_state, 'autoplay', False):
         description += "\n🔁 **AutoPlay is ON**"
+
+    loop_mode = getattr(guild_state, 'loop_mode', 'off')
+    if loop_mode == 'one':
+        description += "\n🔂 **Loop: One**"
+    elif loop_mode == 'all':
+        description += "\n🔁 **Loop: All**"
 
     embed = discord.Embed(description=description, color=Colors.TEAL)
     if song.thumbnail:

@@ -596,6 +596,7 @@ async def help_command(interaction: discord.Interaction):
         ("/search <query>",       "Search YouTube, pick from results"),
         ("/soundcloud <query>",   "SoundCloud – play first result"),
         ("/soundcloud_search",    "SoundCloud – pick from results"),
+        ("/loop <mode>",          "Loop off/one/all"),
         ("/pause",                "Pause playback"),
         ("/resume",               "Resume playback"),
         ("/skip",                 "Vote to skip"),
@@ -897,12 +898,30 @@ async def setrequestchannel(interaction: discord.Interaction, channel: discord.T
     )
 
 
+@app_commands.command(name="loop", description="Set loop mode (off/one/all)")
+@app_commands.describe(mode="off = no loop, one = loop current song, all = loop queue")
+@app_commands.choices(mode=[
+    app_commands.Choice(name="off", value="off"),
+    app_commands.Choice(name="one", value="one"),
+    app_commands.Choice(name="all", value="all"),
+])
+async def loop(interaction: discord.Interaction, mode: str):
+    guild_state = get_guild_state(interaction.guild_id)
+    guild_state.loop_mode = mode
+
+    icons = {"off": "➡️", "one": "🔂", "all": "🔁"}
+    labels = {"off": "Loop Off", "one": "Loop One", "all": "Loop All"}
+    await interaction.response.send_message(f"{icons[mode]} **{labels[mode]}**", ephemeral=True)
+    await refresh_panel(interaction.guild, guild_state)
+
+
 # ──────────────────────────────────────────────
 # REGISTER COMMANDS
 # ──────────────────────────────────────────────
 
 GUILD = discord.Object(id=1106192482083016726)
 
+bot.tree.add_command(loop, guild=GUILD)
 bot.tree.add_command(setrequestchannel, guild=GUILD)
 bot.tree.add_command(ytmusic_play, guild=GUILD)
 bot.tree.add_command(ytmusic_search, guild=GUILD)

@@ -143,6 +143,7 @@ class GuildMusicState:
         self.volume            = Config.DEFAULT_VOLUME / 100
         self.now_playing_message = None
         self.loop_mode         = 'off'
+        self.autoplay          = False
         self.song_start_time   = None
         self.pause_start_time  = None
         self.paused_duration   = 0
@@ -209,6 +210,48 @@ def cleanup_guild_state(guild_id):
         del guild_states[guild_id]
 
 
+async def fetch_autoplay_suggestion(song, loop):
+    def _fetch():
+        import ytmusicapi
+        ytmusic = ytmusicapi.YTMusic()
+        video_id = song.data.get('id')
+        if not video_id:
+            import re
+            url = song.webpage_url or song.url or ""
+            match = re.search(r"v=([a-zA-Z0-9_-]+)", url)
+            if match:
+                video_id = match.group(1)
+            else:
+                match = re.search(r"youtu\.be/([a-zA-Z0-9_-]+)", url)
+                if match:
+                    video_id = match.group(1)
+        
+        if not video_id:
+            # Fallback search
+            results = ytmusic.search(song.title, filter="songs", limit=1)
+            if results and results[0].get('videoId'):
+                video_id = results[0]['videoId']
+                
+        if not video_id:
+            return None
+            
+        try:
+            watch = ytmusic.get_watch_playlist(videoId=video_id)
+            tracks = watch.get('tracks', [])
+            for track in tracks:
+                t_id = track.get('videoId')
+                if t_id and t_id != video_id:
+                    return f"https://www.youtube.com/watch?v={t_id}"
+        except Exception as e:
+            print(f"ytmusicapi error: {e}")
+        return None
+
+    next_url = await loop.run_in_executor(None, _fetch)
+    if next_url:
+        return await YTDLSource.from_url(next_url, loop=loop, requester=song.requester)
+    return None
+
+
 async def play_next_song(voice_client, guild_state, bot_loop):
     from stats_store import record_play
 
@@ -223,6 +266,19 @@ async def play_next_song(voice_client, guild_state, bot_loop):
     else:
         if loop_mode == 'all' and guild_state.current_song:
             next_song = guild_state.current_song
+        elif guild_state.autoplay and guild_state.current_song:
+            print("Autoplay looking for next song...")
+            try:
+                auto_song = await fetch_autoplay_suggestion(guild_state.current_song, bot_loop)
+                if auto_song:
+                    next_song = auto_song
+                else:
+                    guild_state.current_song = None
+                    return
+            except Exception as e:
+                print(f"Autoplay failed: {e}")
+                guild_state.current_song = None
+                return
         else:
             guild_state.current_song = None
             return

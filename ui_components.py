@@ -118,7 +118,10 @@ class ControlPanelView(discord.ui.View):
 
     @discord.ui.button(emoji="🔁", label="AutoPlay", style=discord.ButtonStyle.secondary, custom_id="cp_autoplay", row=1)
     async def autoplay_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("🔁 AutoPlay not implemented yet.", ephemeral=True)
+        self.guild_state.autoplay = not self.guild_state.autoplay
+        state_str = "ON" if self.guild_state.autoplay else "OFF"
+        await interaction.response.send_message(f"🔁 AutoPlay is now **{state_str}**", ephemeral=True)
+        await self._refresh_panel(interaction)
 
     @discord.ui.button(emoji="🤍", label="Like",     style=discord.ButtonStyle.secondary, custom_id="cp_like",     row=1)
     async def like_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -195,6 +198,8 @@ def create_control_panel_embed(guild_state) -> discord.Embed:
             f"\n`{q_count}` song{'s' if q_count != 1 else ''} in queue "
             f"for `{q_summary}` of listening  |  Volume: `{vol_pct}%`"
         )
+    if getattr(guild_state, 'autoplay', False):
+        description += "\n🔁 **AutoPlay is ON**"
 
     embed = discord.Embed(description=description, color=Colors.TEAL)
     if song.thumbnail:

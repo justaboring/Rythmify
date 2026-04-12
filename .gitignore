@@ -1,0 +1,18 @@
+# Sensitive Data
+.env
+cookies.txt
+*.cookies
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Logs
+*.log

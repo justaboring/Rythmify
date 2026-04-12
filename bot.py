@@ -17,6 +17,7 @@ from ui_components import (
     ControlPanelView, create_control_panel_embed, create_dashboard_embed
 )
 from panel_store import get_panel, set_panel, clear_panel
+from request_channel_store import get_request_channel, set_request_channel, clear_request_channel
 from utils import parse_spotify_url, is_url
 from ytmusic_module import (
     search_songs, search_videos, get_artist_radio,
@@ -609,6 +610,7 @@ async def help_command(interaction: discord.Interaction):
         ("/clear",                "Clear queue (DJ only)"),
         ("/join",                 "Join voice channel"),
         ("/leave",                "Leave voice channel (DJ only)"),
+        ("/setrequestchannel",    "Set song request channel (DJ/Admin)"),
         ("/controlpanel",         "Toggle persistent music panel (DJ/Admin)"),
     ]
     for cmd, desc in commands_list:
@@ -876,40 +878,136 @@ async def ytplaylist(interaction: discord.Interaction, playlist_id: str):
         await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
 
+@app_commands.command(name="setrequestchannel", description="Set song request channel (DJ/Admin only)")
+@app_commands.describe(channel="Channel for song requests, or leave empty to disable")
+async def setrequestchannel(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    if not is_dj(interaction.user):
+        return await interaction.response.send_message("❌ DJ or Admin only!", ephemeral=True)
+
+    if channel is None:
+        clear_request_channel(interaction.guild_id)
+        return await interaction.response.send_message("🗑️ Song request channel disabled.", ephemeral=True)
+
+    set_request_channel(interaction.guild_id, channel.id)
+    await interaction.response.send_message(
+        f"✅ Song request channel set to {channel.mention}!\n"
+        f"Users can now type a song name or YouTube URL there to queue songs.\n"
+        f"Max queue size: 50",
+        ephemeral=True
+    )
+
+
 # ──────────────────────────────────────────────
 # REGISTER COMMANDS
 # ──────────────────────────────────────────────
 
-bot.tree.add_command(ytmusic_play)
-bot.tree.add_command(ytmusic_search)
-bot.tree.add_command(artist_radio)
-bot.tree.add_command(mood_play)
-bot.tree.add_command(ytplaylist)
-bot.tree.add_command(controlpanel)
-bot.tree.add_command(join)
-bot.tree.add_command(play)
-bot.tree.add_command(search)
-bot.tree.add_command(soundcloud_play)
-bot.tree.add_command(soundcloud_search)
-bot.tree.add_command(skip)
-bot.tree.add_command(forceskip)
-bot.tree.add_command(pause)
-bot.tree.add_command(resume)
-bot.tree.add_command(stop)
-bot.tree.add_command(show_queue)
-bot.tree.add_command(nowplaying)
-bot.tree.add_command(volume)
-bot.tree.add_command(remove)
-bot.tree.add_command(move)
-bot.tree.add_command(shuffle)
-bot.tree.add_command(clear)
-bot.tree.add_command(leave)
-bot.tree.add_command(help_command)
+GUILD = discord.Object(id=1106192482083016726)
+
+bot.tree.add_command(setrequestchannel, guild=GUILD)
+bot.tree.add_command(ytmusic_play, guild=GUILD)
+bot.tree.add_command(ytmusic_search, guild=GUILD)
+bot.tree.add_command(artist_radio, guild=GUILD)
+bot.tree.add_command(mood_play, guild=GUILD)
+bot.tree.add_command(ytplaylist, guild=GUILD)
+bot.tree.add_command(controlpanel, guild=GUILD)
+bot.tree.add_command(join, guild=GUILD)
+bot.tree.add_command(play, guild=GUILD)
+bot.tree.add_command(search, guild=GUILD)
+bot.tree.add_command(soundcloud_play, guild=GUILD)
+bot.tree.add_command(soundcloud_search, guild=GUILD)
+bot.tree.add_command(skip, guild=GUILD)
+bot.tree.add_command(forceskip, guild=GUILD)
+bot.tree.add_command(pause, guild=GUILD)
+bot.tree.add_command(resume, guild=GUILD)
+bot.tree.add_command(stop, guild=GUILD)
+bot.tree.add_command(show_queue, guild=GUILD)
+bot.tree.add_command(nowplaying, guild=GUILD)
+bot.tree.add_command(volume, guild=GUILD)
+bot.tree.add_command(remove, guild=GUILD)
+bot.tree.add_command(move, guild=GUILD)
+bot.tree.add_command(shuffle, guild=GUILD)
+bot.tree.add_command(clear, guild=GUILD)
+bot.tree.add_command(leave, guild=GUILD)
+bot.tree.add_command(help_command, guild=GUILD)
 
 
 # ──────────────────────────────────────────────
 # EVENTS
 # ──────────────────────────────────────────────
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    # Check if message is in request channel
+    request_channel_id = get_request_channel(message.guild.id) if message.guild else None
+    if not request_channel_id or message.channel.id != request_channel_id:
+        await bot.process_commands(message)
+        return
+
+    query = message.content.strip()
+    if not query:
+        return
+
+    # Delete user message to keep channel clean
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # Check if user is in voice channel
+    if not message.author.voice:
+        msg = await message.channel.send(f"❌ {message.author.mention} Join a voice channel first!", delete_after=5)
+        return
+
+    guild_state = get_guild_state(message.guild.id)
+
+    # Check queue size
+    if len(guild_state.queue) >= 50:
+        await message.channel.send(f"❌ {message.author.mention} Queue is full! (50/50)", delete_after=5)
+        return
+
+    # Connect to voice if needed
+    voice_client = message.guild.voice_client
+    if voice_client is None:
+        voice_client = await message.author.voice.channel.connect()
+        await asyncio.sleep(1)
+    elif voice_client.channel != message.author.voice.channel:
+        await message.channel.send(f"❌ {message.author.mention} Bot is in a different voice channel!", delete_after=5)
+        return
+
+    # Send loading message
+    loading_msg = await message.channel.send(f"🔍 Searching for **{query[:50]}**...")
+
+    try:
+        if not query.startswith('http'):
+            search_query = f"ytsearch:{query}"
+        else:
+            search_query = query
+
+        source = await YTDLSource.from_url(search_query, loop=bot.loop, stream=True, requester=message.author)
+
+        already_playing = voice_client.is_playing() or voice_client.is_paused()
+
+        if not guild_state.add_to_queue(source):
+            await loading_msg.edit(content=f"❌ Queue is full!")
+            return
+
+        pos = len(guild_state.queue)
+        dur = source.format_duration() if source.duration else "?:??"
+        await loading_msg.edit(content=f"✅ **{source.title[:60]}** — `{dur}` added to queue #{pos} by {message.author.mention}")
+
+        if not already_playing:
+            await play_next_song(voice_client, guild_state, bot.loop)
+
+        await refresh_panel(message.guild, guild_state)
+
+    except Exception as e:
+        await loading_msg.edit(content=f"❌ Error: {str(e)[:100]}")
+
+    await bot.process_commands(message)
+
 
 @bot.event
 async def on_track_update(guild, guild_state):
@@ -922,7 +1020,9 @@ async def on_ready():
     print('------')
     try:
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} slash commands")
+        print(f"Synced {len(synced)} slash commands globally")
+        synced = await bot.tree.sync(guild=discord.Object(id=1106192482083016726))
+        print(f"Synced {len(synced)} slash commands to guild")
     except Exception as e:
         print(f"Error syncing commands: {e}")
 

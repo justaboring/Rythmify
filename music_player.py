@@ -39,6 +39,20 @@ async def prefetch_next(guild_state, bot_loop):
             print(f"Pre-fetch failed: {e}")
 
 
+async def _prefetch_autoplay(guild_state, current_song, bot_loop):
+    """Pre-fetch autoplay suggestion in background while current song plays."""
+    if _prefetch_cache.get(guild_state.guild_id):
+        return  # already have something cached
+    try:
+        print(f"Pre-fetching autoplay suggestion...")
+        auto_song = await fetch_autoplay_suggestion(current_song, bot_loop, guild_state.history)
+        if auto_song and not _prefetch_cache.get(guild_state.guild_id):
+            _prefetch_cache[guild_state.guild_id] = auto_song
+            print(f"Autoplay pre-fetch done: {auto_song.title}")
+    except Exception as e:
+        print(f"Autoplay pre-fetch failed: {e}")
+
+
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
         super().__init__(source, volume)
@@ -109,11 +123,13 @@ class YTDLSource(discord.PCMVolumeTransformer):
             matched         = sum(1 for w in query_words if w in title)
             relevance_score = (matched / max(len(query_words), 1)) * 25
             uploader        = (entry.get('uploader') or '').lower()
-            channel_bonus   = 10 if any(k in uploader or k in title for k in ['official', 'audio', 'topic']) else 0
+            channel_bonus   = 20 if any(k in uploader for k in ['- topic', 'topic']) else \
+                              15 if any(k in uploader or k in title for k in ['official audio', 'audio only']) else \
+                              10 if any(k in uploader or k in title for k in ['official', 'audio']) else 0
 
             # Penalty for music videos (usually not full song)
             mv_keywords = ['music video', 'official video', 'official mv', '(mv)', '| mv', 'video clip', 'videoclip', 'lyric video', 'official lyric', 'lyrics video', 'lirik', 'liric']
-            mv_penalty  = -20 if any(k in title for k in mv_keywords) else 0
+            mv_penalty  = -50 if any(k in title for k in mv_keywords) else 0
 
             score = view_score + relevance_score + channel_bonus + mv_penalty
 
@@ -194,6 +210,7 @@ class GuildMusicState:
         self.loop_mode           = 'off'
         self.autoplay            = False
         self.history             = []
+        self.song_history        = []  # stores last 10 YTDLSource for prev button
         self.song_start_time     = None
         self.pause_start_time    = None
         self.paused_duration     = 0
@@ -232,6 +249,7 @@ class GuildMusicState:
     def clear(self):
         self.queue.clear()
         self.skip_votes.clear()
+        self.song_history.clear()
         _prefetch_cache.pop(self.guild_id, None)
 
     def get_queue_text(self, start=0, count=10):
@@ -361,14 +379,20 @@ async def play_next_song(voice_client, guild_state, bot_loop):
         elif guild_state.autoplay and guild_state.current_song:
             print("Autoplay looking for next song...")
             try:
-                auto_song = await fetch_autoplay_suggestion(guild_state.current_song, bot_loop, guild_state.history)
-                if auto_song:
-                    next_song = auto_song
+                # Check prefetch cache first
+                cached = _prefetch_cache.pop(guild_state.guild_id, None)
+                if cached:
+                    print(f"Using pre-fetched autoplay: {cached.title}")
+                    next_song = cached
                 else:
-                    guild_state.current_song = None
-                    if getattr(voice_client, 'client', None):
-                        voice_client.client.dispatch('track_update', voice_client.guild, guild_state)
-                    return
+                    auto_song = await fetch_autoplay_suggestion(guild_state.current_song, bot_loop, guild_state.history)
+                    if auto_song:
+                        next_song = auto_song
+                    else:
+                        guild_state.current_song = None
+                        if getattr(voice_client, 'client', None):
+                            voice_client.client.dispatch('track_update', voice_client.guild, guild_state)
+                        return
             except Exception as e:
                 print(f"Autoplay failed: {e}")
                 guild_state.current_song = None
@@ -444,6 +468,12 @@ async def play_next_song(voice_client, guild_state, bot_loop):
         record_play(guild_state.guild_id, next_song.title)
         print(f"Now playing: {next_song.title}")
 
+        # Save to song history for prev button
+        if guild_state.current_song and guild_state.current_song != next_song:
+            guild_state.song_history.append(guild_state.current_song)
+            if len(guild_state.song_history) > 10:
+                guild_state.song_history.pop(0)
+
         if getattr(voice_client, 'client', None):
             voice_client.client.dispatch('track_update', voice_client.guild, guild_state)
 
@@ -451,6 +481,12 @@ async def play_next_song(voice_client, guild_state, bot_loop):
         if guild_state.queue:
             asyncio.run_coroutine_threadsafe(
                 prefetch_next(guild_state, bot_loop),
+                bot_loop
+            )
+        elif guild_state.autoplay:
+            # Pre-fetch autoplay suggestion in background
+            asyncio.run_coroutine_threadsafe(
+                _prefetch_autoplay(guild_state, next_song, bot_loop),
                 bot_loop
             )
 

@@ -1037,6 +1037,18 @@ async def on_message(message: discord.Message):
 @bot.event
 async def on_track_update(guild, guild_state):
     await refresh_panel(guild, guild_state)
+    # Update bot status to show current song
+    if guild_state.current_song:
+        await bot.change_presence(
+            activity=discord.Activity(
+                type=discord.ActivityType.listening,
+                name=guild_state.current_song.title[:128]
+            )
+        )
+    else:
+        await bot.change_presence(
+            activity=discord.Activity(type=discord.ActivityType.listening, name="/help")
+        )
 
 @bot.event
 async def on_ready():

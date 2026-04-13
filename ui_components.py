@@ -134,7 +134,35 @@ class ControlPanelView(discord.ui.View):
 
     @discord.ui.button(emoji="⏮️", label="Prev", style=discord.ButtonStyle.primary, custom_id="cp_prev_song", row=0)
     async def prev_song_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("⏮️ No previous song support yet.", ephemeral=True)
+        voice_client = interaction.guild.voice_client
+        guild_state  = self.guild_state
+
+        if not guild_state.song_history:
+            return await interaction.response.send_message("⏮️ No previous song!", ephemeral=True)
+
+        prev = guild_state.song_history.pop()
+
+        # Put current song back to front of queue
+        if guild_state.current_song:
+            guild_state.queue.insert(0, guild_state.current_song)
+
+        # Stop current and play prev
+        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+            voice_client.stop()
+
+        guild_state.current_song = prev
+        await interaction.response.send_message(f"⏮️ Playing previous: **{prev.title[:60]}**", ephemeral=True)
+
+        from music_player import play_next_song, YTDLSource
+        import asyncio
+        try:
+            refreshed = await YTDLSource.refresh(prev)
+            guild_state.current_song = refreshed
+            guild_state.queue.insert(0, refreshed)
+            if voice_client:
+                voice_client.stop()
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @discord.ui.button(emoji="⏸️", label="Pause", style=discord.ButtonStyle.primary, custom_id="cp_pause", row=0)
     async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):

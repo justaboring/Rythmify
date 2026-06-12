@@ -24,6 +24,7 @@ from ytmusic_module import (
     get_song_radio, get_mood_playlists, get_mood_tracks,
     get_playlist_tracks, track_to_source_data
 )
+from spotify_module import SpotifyClient
 
 Config.setup_ssl()
 Config.validate()
@@ -35,6 +36,23 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 soundcloud_client = SoundCloudClient()
+spotify_client = SpotifyClient(Config.SPOTIFY_CLIENT_ID, Config.SPOTIFY_CLIENT_SECRET)
+
+
+def handle_spotify_urls_sync(query: str) -> list:
+    match = parse_spotify_url(query)
+    if not match:
+        return []
+    url_type, spotify_id = match
+    if url_type == 'track':
+        q = spotify_client.get_track_query(spotify_id)
+        return [q] if q else []
+    elif url_type == 'playlist':
+        return spotify_client.get_playlist_queries(spotify_id)
+    elif url_type == 'album':
+        return spotify_client.get_album_queries(spotify_id)
+    return []
+
 
 
 # ──────────────────────────────────────────────
@@ -306,8 +324,42 @@ async def play(interaction: discord.Interaction, query: str):
     guild_state = get_guild_state(interaction.guild_id)
 
     try:
+        is_spotify = "spotify.com" in query
+        if is_spotify:
+            spotify_queries = await bot.loop.run_in_executor(None, handle_spotify_urls_sync, query)
+            if not spotify_queries:
+                return await interaction.followup.send("❌ Failed to resolve Spotify link or it's empty.", ephemeral=True)
+            
+            added = 0
+            for sq in spotify_queries[:20]:
+                if len(guild_state.queue) >= Config.MAX_QUEUE_SIZE:
+                    break
+                try:
+                    source = await YTDLSource.from_url(f"ytsearch:{sq}", loop=bot.loop, stream=True, requester=interaction.user)
+                    if guild_state.add_to_queue(source):
+                        added += 1
+                except Exception:
+                    continue
+            
+            if added == 0:
+                return await interaction.followup.send("❌ Failed to load Spotify tracks!", ephemeral=True)
+            
+            already_playing = voice_client.is_playing() or voice_client.is_paused()
+            await interaction.followup.send(f"🎵 Added **{added}** tracks from Spotify!", ephemeral=True)
+            
+            if not already_playing:
+                await play_next_song(voice_client, guild_state, bot.loop)
+            
+            await refresh_panel(interaction.guild, guild_state)
+            return
+
         if not query.startswith('http'):
-            query = f"ytsearch:{query}"
+            # Try to resolve via Spotify search first
+            spotify_search = await bot.loop.run_in_executor(None, spotify_client.search_track, query)
+            if spotify_search:
+                query = f"ytsearch:{spotify_search}"
+            else:
+                query = f"ytsearch:{query}"
 
         source = await YTDLSource.from_url(query, loop=bot.loop, stream=True, requester=interaction.user)
 
@@ -1000,8 +1052,51 @@ async def on_message(message: discord.Message):
     loading_msg = await message.channel.send(f"🔍 Searching for **{query[:50]}**...")
 
     try:
+        is_spotify = "spotify.com" in query
+        if is_spotify:
+            spotify_queries = await bot.loop.run_in_executor(None, handle_spotify_urls_sync, query)
+            if not spotify_queries:
+                await loading_msg.edit(content="❌ Failed to resolve Spotify link or it's empty.")
+                await asyncio.sleep(5)
+                await loading_msg.delete()
+                return
+            
+            added = 0
+            for sq in spotify_queries[:20]:
+                if len(guild_state.queue) >= Config.MAX_QUEUE_SIZE:
+                    break
+                try:
+                    source = await YTDLSource.from_url(f"ytsearch:{sq}", loop=bot.loop, stream=True, requester=message.author)
+                    if guild_state.add_to_queue(source):
+                        added += 1
+                except Exception:
+                    continue
+            
+            if added == 0:
+                await loading_msg.edit(content="❌ Failed to load Spotify tracks!")
+                await asyncio.sleep(5)
+                await loading_msg.delete()
+                return
+            
+            already_playing = voice_client.is_playing() or voice_client.is_paused()
+            await loading_msg.edit(content=f"🎵 Added **{added}** tracks from Spotify by {message.author.mention}")
+            await asyncio.sleep(5)
+            await loading_msg.delete()
+            
+            if not already_playing:
+                await play_next_song(voice_client, guild_state, bot.loop)
+            
+            await refresh_panel(message.guild, guild_state)
+            await bot.process_commands(message)
+            return
+
         if not query.startswith('http'):
-            search_query = f"ytsearch:{query}"
+            # Try to resolve via Spotify search first
+            spotify_search = await bot.loop.run_in_executor(None, spotify_client.search_track, query)
+            if spotify_search:
+                search_query = f"ytsearch:{spotify_search}"
+            else:
+                search_query = f"ytsearch:{query}"
         else:
             search_query = query
 

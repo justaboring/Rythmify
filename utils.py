@@ -3,9 +3,9 @@ from typing import Optional, Tuple
 
 # Pre-compiled regex patterns for Spotify URLs
 SPOTIFY_PATTERNS = [
-    (re.compile(r'open\.spotify\.com/track/([a-zA-Z0-9]+)'), 'track'),
-    (re.compile(r'open\.spotify\.com/album/([a-zA-Z0-9]+)'), 'album'),
-    (re.compile(r'open\.spotify\.com/playlist/([a-zA-Z0-9]+)'), 'playlist'),
+    (re.compile(r'open\.spotify\.com/track/([a-zA-Z0-9]+)(?:\?.*)?'), 'track'),
+    (re.compile(r'open\.spotify\.com/album/([a-zA-Z0-9]+)(?:\?.*)?'), 'album'),
+    (re.compile(r'open\.spotify\.com/playlist/([a-zA-Z0-9]+)(?:\?.*)?'), 'playlist'),
 ]
 
 

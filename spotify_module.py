@@ -41,19 +41,42 @@ class SpotifyClient:
             print(f"Spotify search_track error: {e}")
             return None
 
+    def search_playlist_queries(self, query: str) -> List[str]:
+        """Mencari playlist secara global berdasarkan nama dan mengambil track-nya."""
+        if not self.enabled or not self.client:
+            return []
+        try:
+            # Cari playlist yang paling relevan
+            results = self.client.search(q=query, type='playlist', limit=1)
+            items = results.get('playlists', {}).get('items', [])
+            if items:
+                playlist_id = items[0]['id']
+                return self.get_playlist_queries(playlist_id)
+            return []
+        except Exception as e:
+            print(f"Spotify search_playlist error: {e}")
+            return []
+
     def get_playlist_queries(self, playlist_id: str) -> List[str]:
         if not self.enabled or not self.client:
             return []
         queries = []
         try:
-            # We fetch up to 100 tracks for now to prevent huge queues
-            results = self.client.playlist_items(playlist_id, limit=100)
-            for item in results.get('items', []):
-                track = item.get('track')
-                if track:
-                    artist = track['artists'][0]['name']
-                    name = track['name']
-                    queries.append(f"{artist} - {name}")
+            # Fetch tracks with pagination support
+            results = self.client.playlist_items(playlist_id, limit=100, additional_types=('track',))
+            while results:
+                for item in results.get('items', []):
+                    track = item.get('track')
+                    if track and track.get('name'):
+                        artist = track['artists'][0]['name']
+                        name = track['name']
+                        queries.append(f"{artist} - {name}")
+                
+                # Limit to 200 tracks to avoid extreme wait times during YouTube resolution
+                if results['next'] and len(queries) < 200:
+                    results = self.client.next(results)
+                else:
+                    results = None
             return queries
         except Exception as e:
             print(f"Spotify get_playlist_queries error: {e}")
@@ -65,10 +88,15 @@ class SpotifyClient:
         queries = []
         try:
             results = self.client.album_tracks(album_id, limit=50)
-            for track in results.get('items', []):
-                artist = track['artists'][0]['name']
-                name = track['name']
-                queries.append(f"{artist} - {name}")
+            while results:
+                for track in results.get('items', []):
+                    artist = track['artists'][0]['name']
+                    name = track['name']
+                    queries.append(f"{artist} - {name}")
+                if results['next'] and len(queries) < 100:
+                    results = self.client.next(results)
+                else:
+                    results = None
             return queries
         except Exception as e:
             print(f"Spotify get_album_queries error: {e}")

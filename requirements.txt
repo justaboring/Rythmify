@@ -6,4 +6,6 @@ ffmpeg-python==0.2.0
 spotipy==2.23.0
 aiohttp
 ytmusicapi
-audioop-lts; python_version >= "3.13"
+jinja2
+aiohttp-jinja2
+audioop-lts; python_version >= "3.13"

@@ -3,25 +3,33 @@ import discord
 import yt_dlp as youtube_dl
 from config import Config
 from utils import format_duration
+from quality_store import get_quality
 import concurrent.futures
 
-process_pool = concurrent.futures.ThreadPoolExecutor()
+process_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)  # Optimized for 4 concurrent downloads
 
-def _extract_info_sync(url, download=False):
+def _extract_info_sync(url, download=False, quality_preset=None):
     import yt_dlp
     from config import Config
-    ytdl = yt_dlp.YoutubeDL(Config.YTDL_FORMAT_OPTIONS)
+
+    # Use quality-specific format if provided, otherwise default
+    ytdl_opts = Config.YTDL_FORMAT_OPTIONS.copy()
+    if quality_preset and quality_preset in Config.VOICE_QUALITY_PRESETS:
+        ytdl_opts['format'] = Config.VOICE_QUALITY_PRESETS[quality_preset]['ytdl_format']
+
+    ytdl = yt_dlp.YoutubeDL(ytdl_opts)
     return ytdl.extract_info(url, download=download)
 
 ytdl = youtube_dl.YoutubeDL(Config.YTDL_FORMAT_OPTIONS)
 
-# ──────────────────────────────────────────────
-# PREFETCH CACHE
+# ────────────────────────────────────────────── 
+# PREFETCH CACHE 
 # ──────────────────────────────────────────────
 
 # guild_id -> prefetched YTDLSource (next song ready to play)
 _prefetch_cache: dict = {}
-
+# Limit cache size to prevent memory bloat
+MAX_CACHE_SIZE = 10
 
 async def prefetch_next(guild_state, bot_loop):
     """Pre-fetch the next song in queue in background."""
@@ -33,11 +41,15 @@ async def prefetch_next(guild_state, bot_loop):
         try:
             print(f"Pre-fetching: {next_song.title}")
             refreshed = await YTDLSource.refresh(next_song, loop=bot_loop)
+            # Manage cache size
+            if len(_prefetch_cache) >= MAX_CACHE_SIZE:
+                # Remove oldest entry
+                oldest_key = next(iter(_prefetch_cache))
+                _prefetch_cache.pop(oldest_key)
             _prefetch_cache[guild_state.guild_id] = refreshed
             print(f"Pre-fetch done: {refreshed.title}")
         except Exception as e:
             print(f"Pre-fetch failed: {e}")
-
 
 async def _prefetch_autoplay(guild_state, current_song, bot_loop):
     """Pre-fetch autoplay suggestion in background while current song plays."""
@@ -45,13 +57,17 @@ async def _prefetch_autoplay(guild_state, current_song, bot_loop):
         return  # already have something cached
     try:
         print(f"Pre-fetching autoplay suggestion...")
-        auto_song = await fetch_autoplay_suggestion(current_song, bot_loop, guild_state.history)
+        auto_song = await fetch_autoplay_suggestion(current_song, bot_loop, guild_state.history, guild_state.song_history)
         if auto_song and not _prefetch_cache.get(guild_state.guild_id):
+            # Manage cache size
+            if len(_prefetch_cache) >= MAX_CACHE_SIZE:
+                # Remove oldest entry
+                oldest_key = next(iter(_prefetch_cache))
+                _prefetch_cache.pop(oldest_key)
             _prefetch_cache[guild_state.guild_id] = auto_song
             print(f"Autoplay pre-fetch done: {auto_song.title}")
     except Exception as e:
         print(f"Autoplay pre-fetch failed: {e}")
-
 
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
@@ -66,13 +82,19 @@ class YTDLSource(discord.PCMVolumeTransformer):
         self.requester = None
 
     @classmethod
-    async def from_url(cls, url, *, loop=None, stream=True, requester=None):
+    async def from_url(cls, url, *, loop=None, stream=True, requester=None, quality_preset=None):
         loop = loop or asyncio.get_event_loop()
+
+        # Get quality from guild if not specified
+        if not quality_preset and requester and hasattr(requester, 'guild'):
+            quality_preset = get_quality(requester.guild.id)
+
         data = await loop.run_in_executor(
             process_pool,
             _extract_info_sync,
             url,
-            not stream
+            not stream,
+            quality_preset
         )
 
         if 'entries' in data:
@@ -86,12 +108,34 @@ class YTDLSource(discord.PCMVolumeTransformer):
         if filename:
             print(f"URL starts with: {filename[:60]}...")
 
+        # Build FFmpeg options with quality-specific buffer
+        quality_preset = quality_preset or Config.DEFAULT_QUALITY
+        preset_config = Config.VOICE_QUALITY_PRESETS.get(quality_preset, Config.VOICE_QUALITY_PRESETS[Config.DEFAULT_QUALITY])
+        buffer_size = preset_config['buffersize']
+        bitrate = preset_config['bitrate']
+
+        base_options_list = ['-vn', '-bufsize', buffer_size]
+
+        # Add bitrate constraint for consistent output
+        base_options_list.extend(['-b:a', bitrate])
+
+        # Handle filters properly: combine into a single -af flag
+        active_filter = None
+        if requester and hasattr(requester, 'guild'):
+            st = get_guild_state(requester.guild.id)
+            active_filter = st.active_filter
+
+        if active_filter:
+            base_options_list.extend(['-af', active_filter])
+
+        base_options = ' '.join(base_options_list)
+
         try:
             ffmpeg_audio = discord.FFmpegPCMAudio(
                 filename,
                 executable=Config.FFMPEG_PATH,
                 before_options=Config.FFMPEG_OPTIONS.get('before_options', ''),
-                options=Config.FFMPEG_OPTIONS.get('options', '-vn')
+                options=base_options
             )
         except Exception as e:
             print(f"Error creating FFmpegPCMAudio: {e}")
@@ -123,9 +167,10 @@ class YTDLSource(discord.PCMVolumeTransformer):
             matched         = sum(1 for w in query_words if w in title)
             relevance_score = (matched / max(len(query_words), 1)) * 25
             uploader        = (entry.get('uploader') or '').lower()
-            channel_bonus   = 20 if any(k in uploader for k in ['- topic', 'topic']) else \
+            # Spotify focuses on studio high-quality versions (Topic channels)
+            channel_bonus   = 45 if any(k in uploader for k in ['- topic', 'topic']) else \
                               15 if any(k in uploader or k in title for k in ['official audio', 'audio only']) else \
-                              10 if any(k in uploader or k in title for k in ['official', 'audio']) else 0
+                              10 if any(k in uploader or k in title for k in ['official', 'audio']) else -15
 
             # Penalty for music videos (usually not full song)
             mv_keywords = ['music video', 'official video', 'official mv', '(mv)', '| mv', 'video clip', 'videoclip', 'lyric video', 'official lyric', 'lyrics video', 'lirik', 'liric']
@@ -158,7 +203,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         return await cls.from_url(webpage_url, loop=loop, requester=requester)
 
     @classmethod
-    async def refresh(cls, song, *, loop=None):
+    async def refresh(cls, song, *, loop=None, quality_preset=None):
         loop        = loop or asyncio.get_event_loop()
         webpage_url = song.webpage_url
         if not webpage_url:
@@ -170,24 +215,42 @@ class YTDLSource(discord.PCMVolumeTransformer):
         except Exception:
             pass
 
+        # Get quality from requester's guild if not specified
+        if not quality_preset and song.requester and hasattr(song.requester, 'guild'):
+            quality_preset = get_quality(song.requester.guild.id)
+
         data = await loop.run_in_executor(
             process_pool,
             _extract_info_sync,
             webpage_url,
-            False
+            False,
+            quality_preset
         )
 
         if 'entries' in data:
             data = data['entries'][0]
 
         stream_url = data['url']
+
+        # Rebuild options with current filters and quality
+        quality_preset = quality_preset or Config.DEFAULT_QUALITY
+        preset_config = Config.VOICE_QUALITY_PRESETS.get(quality_preset, Config.VOICE_QUALITY_PRESETS[Config.DEFAULT_QUALITY])
+        buffer_size = preset_config['buffersize']
+        bitrate = preset_config['bitrate']
+
+        ffmpeg_opts = ['-vn', '-bufsize', buffer_size, '-b:a', bitrate]
+
+        state = get_guild_state(song.requester.guild.id) if song.requester else None
+        if state and state.active_filter:
+            ffmpeg_opts.extend(['-af', state.active_filter])
+
         print(f"Refreshed stream URL for: {data.get('title', 'Unknown')}")
 
         ffmpeg_audio = discord.FFmpegPCMAudio(
             stream_url,
             executable=Config.FFMPEG_PATH,
             before_options=Config.FFMPEG_OPTIONS.get('before_options', ''),
-            options=Config.FFMPEG_OPTIONS.get('options', '-vn')
+            options=' '.join(ffmpeg_opts)
         )
 
         refreshed           = cls(ffmpeg_audio, data=data, volume=song.volume)
@@ -196,7 +259,6 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
     def format_duration(self):
         return format_duration(self.duration)
-
 
 class GuildMusicState:
     def __init__(self, guild_id):
@@ -214,14 +276,23 @@ class GuildMusicState:
         self.song_start_time     = None
         self.pause_start_time    = None
         self.paused_duration     = 0
+        self.active_filter       = None # format: filter string
 
     def get_elapsed(self):
         import time
         if self.song_start_time is None:
             return 0
-        elapsed = time.time() - self.song_start_time - self.paused_duration
-        if self.is_paused and self.pause_start_time:
-            elapsed -= (time.time() - self.pause_start_time)
+        
+        elapsed = time.time() - self.song_start_time
+        
+        if self.is_paused:
+            # When paused, subtract the current pause duration
+            if self.pause_start_time:
+                elapsed -= (time.time() - self.pause_start_time)
+        else:
+            # When playing normally, subtract only accumulated paused time
+            elapsed -= self.paused_duration
+        
         return max(0, int(elapsed))
 
     def add_to_queue(self, song):
@@ -264,26 +335,22 @@ class GuildMusicState:
             lines.append(f"*...and {len(self.queue) - start - count} more*")
         return "\n".join(lines)
 
-
 guild_states = {}
-
 
 def get_guild_state(guild_id):
     if guild_id not in guild_states:
         guild_states[guild_id] = GuildMusicState(guild_id)
     return guild_states[guild_id]
 
-
 def cleanup_guild_state(guild_id):
     if guild_id in guild_states:
         del guild_states[guild_id]
     _prefetch_cache.pop(guild_id, None)
 
-
-async def fetch_autoplay_suggestion(song, loop, history):
+async def fetch_autoplay_suggestion(song, loop, history, song_history=None):
     def _fetch():
         import ytmusicapi
-        ytmusic = ytmusicapi.YTMusic()
+        ytm = ytmusicapi.YTMusic()
         video_id = song.data.get('id')
         if not video_id:
             import re
@@ -297,7 +364,7 @@ async def fetch_autoplay_suggestion(song, loop, history):
                     video_id = match.group(1)
 
         if not video_id:
-            results = ytmusic.search(song.title, filter="songs", limit=1)
+            results = ytm.search(song.title, filter="songs", limit=1)
             if results and results[0].get('videoId'):
                 video_id = results[0]['videoId']
 
@@ -305,38 +372,41 @@ async def fetch_autoplay_suggestion(song, loop, history):
             return None
 
         try:
-            import random
-            watch = ytmusic.get_watch_playlist(videoId=video_id, radio=True, limit=50)
+            # YouTube Music's 'watch playlist' is essentially their algorithmic radio
+            watch = ytm.get_watch_playlist(videoId=video_id, radio=True, limit=50)
             tracks = watch.get('tracks', [])
 
-            current_artists = set()
-            for t in tracks:
-                if t.get('videoId') == video_id:
-                    for a in t.get('artists', []):
-                        if a.get('name'): current_artists.add(a.get('name'))
-                    break
+            # Get artists from recent songs to maintain 'vibe' consistency
+            recent_artists = set()
+            if song_history:
+                for s in song_history[-3:]:
+                    if hasattr(s, 'uploader'): recent_artists.add(s.uploader.lower())
 
             candidates = []
             for track in tracks:
                 t_id = track.get('videoId')
                 if not t_id or t_id == video_id or t_id in history:
                     continue
-                candidates.append(track)
+
+                # Spotify-style scoring logic
+                score = 0
+                t_artists = [a.get('name', '').lower() for a in track.get('artists', [])]
+
+                # Favor related artists (vibe) while allowing new ones (discovery)
+                if any(artist in recent_artists for artist in t_artists):
+                    score += 15 # High relevance
+                else:
+                    score += 5  # Exploration
+
+                candidates.append((score, track))
 
             if candidates:
-                diff_artist_candidates = []
-                for t in candidates:
-                    t_artists = set(a.get('name') for a in t.get('artists', []) if a.get('name'))
-                    if not current_artists.intersection(t_artists):
-                        diff_artist_candidates.append(t)
-
-                if diff_artist_candidates and random.random() < 0.85:
-                    pool = diff_artist_candidates[:30]
-                else:
-                    pool = candidates[:30]
-
-                chosen = random.choice(pool)
-                return f"https://www.youtube.com/watch?v={chosen['videoId']}"
+                import random
+                # Sort by score and pick from top 10 for high-quality transitions
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                top_pool = candidates[:10]
+                chosen_score, chosen_track = random.choice(top_pool)
+                return f"https://www.youtube.com/watch?v={chosen_track['videoId']}"
 
         except Exception as e:
             print(f"ytmusicapi error: {e}")
@@ -347,11 +417,11 @@ async def fetch_autoplay_suggestion(song, loop, history):
         return await YTDLSource.from_url(next_url, loop=loop, requester=song.requester)
     return None
 
-
 async def play_next_song(voice_client, guild_state, bot_loop):
     from stats_store import record_play
 
     loop_mode = guild_state.loop_mode
+    previous_song = guild_state.current_song
 
     if loop_mode == 'one' and guild_state.current_song:
         next_song = guild_state.current_song
@@ -385,7 +455,7 @@ async def play_next_song(voice_client, guild_state, bot_loop):
                     print(f"Using pre-fetched autoplay: {cached.title}")
                     next_song = cached
                 else:
-                    auto_song = await fetch_autoplay_suggestion(guild_state.current_song, bot_loop, guild_state.history)
+                    auto_song = await fetch_autoplay_suggestion(guild_state.current_song, bot_loop, guild_state.history, guild_state.song_history)
                     if auto_song:
                         next_song = auto_song
                     else:
@@ -405,7 +475,6 @@ async def play_next_song(voice_client, guild_state, bot_loop):
                 voice_client.client.dispatch('track_update', voice_client.guild, guild_state)
             return
 
-    guild_state.current_song = next_song
     guild_state.skip_votes.clear()
 
     # Record history
@@ -425,18 +494,19 @@ async def play_next_song(voice_client, guild_state, bot_loop):
         if len(guild_state.history) > 50:
             guild_state.history.pop(0)
 
-    # Refresh if not pre-fetched
-    if not (_prefetch_cache.get(guild_state.guild_id) == next_song):
+    # ── FIX #6: Refresh BEFORE setting to guild_state ────────────────────────
+    # Only refresh if it's an old song or from autoplay
+    # If it's a fresh YTDLSource with an active original stream, we don't need to refresh
+    if not hasattr(next_song, 'original') or next_song.original is None:
         try:
             next_song = await YTDLSource.refresh(next_song, loop=bot_loop)
-            guild_state.current_song = next_song
         except Exception as e:
             print(f"Error refreshing stream URL for '{next_song.title}': {e}")
-            asyncio.run_coroutine_threadsafe(
-                play_next_song(voice_client, guild_state, bot_loop),
-                bot_loop
-            )
-            return
+            # Try next song instead of raising
+            return await play_next_song(voice_client, guild_state, bot_loop)
+
+    # NOW set to guild_state after refresh succeeds
+    guild_state.current_song = next_song
 
     def after_playing(error):
         if error:
@@ -460,17 +530,27 @@ async def play_next_song(voice_client, guild_state, bot_loop):
         guild_state.song_start_time  = time.time()
         guild_state.paused_duration  = 0
         guild_state.pause_start_time = None
-        voice_client.play(next_song, after=after_playing)
+
+        # ── FIX #3: Better error handling ──────────────────────────────────────
+        if next_song and hasattr(next_song, 'read'):
+            voice_client.play(next_song, after=after_playing)
+        else:
+            raise Exception("Invalid audio source. Ensure FFmpeg is working correctly and cookies.txt exists if needed.")
 
         if hasattr(voice_client.source, 'volume') and voice_client.source.volume is not None:
             voice_client.source.volume = guild_state.volume
 
-        record_play(guild_state.guild_id, next_song.title)
+        record_play(
+            guild_state.guild_id,
+            next_song.title,
+            duration=next_song.duration,
+            uploader=next_song.uploader if hasattr(next_song, 'uploader') else None
+        )
         print(f"Now playing: {next_song.title}")
 
         # Save to song history for prev button
-        if guild_state.current_song and guild_state.current_song != next_song:
-            guild_state.song_history.append(guild_state.current_song)
+        if previous_song and previous_song != next_song:
+            guild_state.song_history.append(previous_song)
             if len(guild_state.song_history) > 10:
                 guild_state.song_history.pop(0)
 

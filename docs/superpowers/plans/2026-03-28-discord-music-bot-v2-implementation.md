@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Rebuild Discord Music Bot dengan slash commands, Spotify integration, interactive embeds, dan admin features.
+**Goal:** Rebuild Discord Music Bot with slash commands, Spotify integration, interactive embeds, and admin features.
 
-**Architecture:** Modular monolith dengan 6 modul: config, music_player, spotify_module, admin_module, ui_components, utils. Slash commands via discord.py app_commands.
+**Architecture:** Modular monolith with 6 modules: config, music_player, spotify_module, admin_module, ui_components, utils. Slash commands via discord.py app_commands.
 
 **Tech Stack:** Python 3.8+, discord.py 2.3.2, yt-dlp, spotipy 2.23.0, PyNaCl, python-dotenv
 

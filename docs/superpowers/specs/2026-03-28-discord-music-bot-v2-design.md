@@ -8,12 +8,12 @@
 
 ## 1. Overview
 
-Discord Music Bot v2 adalah upgrade signifikan dari bot music Discord yang sudah ada. Bot ini menambahkan:
+Discord Music Bot v2 is a significant upgrade from the existing Discord music bot. This bot adds:
 - Spotify integration (search & URL support)
-- Interactive embeds dengan buttons
+- Interactive embeds with buttons
 - Admin features (DJ role, skip vote, queue management)
 - Security fixes & bug fixes
-- Migration dari prefix commands (!) ke slash commands (/)
+- Migration from prefix commands (!) to slash commands (/)
 
 ---
 

@@ -1,0 +1,12 @@
+{
+  "dismissed": [
+    "mood_recommendation",
+    "playlist_tip",
+    "filter_tip"
+  ],
+  "completed": [
+    "mood_recommendation",
+    "playlist_tip",
+    "filter_tip"
+  ]
+}

@@ -91,6 +91,13 @@ class ControlPanelView(discord.ui.View):
         self.per_page    = 8
         self._update_button_states()
 
+    def _get_voice_client(self, interaction: discord.Interaction):
+        if hasattr(self.music_cog, "get_voice_client"):
+            voice_client = self.music_cog.get_voice_client(interaction.guild_id)
+            if voice_client:
+                return voice_client
+        return interaction.guild.voice_client
+
     def _update_button_states(self):
         for child in self.children:
             if getattr(child, 'custom_id', None) == "cp_pause":
@@ -122,7 +129,7 @@ class ControlPanelView(discord.ui.View):
 
     @discord.ui.button(emoji="🔉", label="Vol -", style=discord.ButtonStyle.secondary, custom_id="cp_vol_down", row=0)
     async def vol_down_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        voice_client = interaction.guild.voice_client
+        voice_client = self._get_voice_client(interaction)
         if not voice_client or not voice_client.source:
             return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
         guild_state = self.guild_state
@@ -134,7 +141,7 @@ class ControlPanelView(discord.ui.View):
 
     @discord.ui.button(emoji="⏮️", label="Prev", style=discord.ButtonStyle.primary, custom_id="cp_prev_song", row=0)
     async def prev_song_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        voice_client = interaction.guild.voice_client
+        voice_client = self._get_voice_client(interaction)
         guild_state  = self.guild_state
 
         if not guild_state.song_history:
@@ -142,31 +149,27 @@ class ControlPanelView(discord.ui.View):
 
         prev = guild_state.song_history.pop()
 
+        # Refresh the previous song to get a fresh stream URL + apply filters
+        from music_player import YTDLSource
+        try:
+            refreshed = await YTDLSource.refresh(prev)
+        except Exception as e:
+            return await interaction.response.send_message(f"❌ Error refreshing previous song: {e}", ephemeral=True)
+
         # Put current song back to front of queue
         if guild_state.current_song:
             guild_state.queue.insert(0, guild_state.current_song)
 
-        # Stop current and play prev
+        # Insert refreshed previous song at front, then stop to trigger play_next_song
+        guild_state.queue.insert(0, refreshed)
         if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
             voice_client.stop()
 
-        guild_state.current_song = prev
         await interaction.response.send_message(f"⏮️ Playing previous: **{prev.title[:60]}**", ephemeral=True)
-
-        from music_player import play_next_song, YTDLSource
-        import asyncio
-        try:
-            refreshed = await YTDLSource.refresh(prev)
-            guild_state.current_song = refreshed
-            guild_state.queue.insert(0, refreshed)
-            if voice_client:
-                voice_client.stop()
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @discord.ui.button(emoji="⏸️", label="Pause", style=discord.ButtonStyle.primary, custom_id="cp_pause", row=0)
     async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        voice_client = interaction.guild.voice_client
+        voice_client = self._get_voice_client(interaction)
         guild_state  = self.guild_state
         if not voice_client or (not voice_client.is_playing() and not voice_client.is_paused()):
             return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
@@ -183,7 +186,7 @@ class ControlPanelView(discord.ui.View):
     @discord.ui.button(emoji="⏭️", label="Skip", style=discord.ButtonStyle.primary, custom_id="cp_skip", row=0)
     async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         from admin_module import is_dj, SkipVoteManager
-        voice_client = interaction.guild.voice_client
+        voice_client = self._get_voice_client(interaction)
         if not voice_client or not voice_client.is_playing():
             return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
         guild_state = self.guild_state
@@ -205,7 +208,7 @@ class ControlPanelView(discord.ui.View):
 
     @discord.ui.button(emoji="🔊", label="Vol +", style=discord.ButtonStyle.secondary, custom_id="cp_vol_up", row=0)
     async def vol_up_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        voice_client = interaction.guild.voice_client
+        voice_client = self._get_voice_client(interaction)
         if not voice_client or not voice_client.source:
             return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
         guild_state = self.guild_state
@@ -250,7 +253,7 @@ class ControlPanelView(discord.ui.View):
         from admin_module import is_dj
         if not is_dj(interaction.user):
             return await interaction.response.send_message("❌ DJ only command!", ephemeral=True)
-        voice_client = interaction.guild.voice_client
+        voice_client = self._get_voice_client(interaction)
         if not voice_client:
             return await interaction.response.send_message("❌ Not in a voice channel!", ephemeral=True)
         guild_state = self.guild_state
@@ -272,7 +275,7 @@ class ControlPanelView(discord.ui.View):
         await interaction.response.send_message(f"{icons[next_mode]} **{labels[next_mode]}**", ephemeral=True)
         await self._do_refresh(interaction)
 
-    @discord.ui.button(emoji="📊", label="Stats", style=discord.ButtonStyle.secondary, custom_id="cp_dash", row=2)
+    @discord.ui.button(emoji="🌐", label="Web Dashboard", style=discord.ButtonStyle.secondary, custom_id="cp_dash", row=2)
     async def dashboard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.dashboard_callback(interaction)
 

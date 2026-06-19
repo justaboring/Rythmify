@@ -68,7 +68,7 @@ def _find_ffmpeg() -> str:
 
 
 class Config:
-    DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+    DISCORD_TOKENS = [t.strip() for t in os.getenv('DISCORD_TOKEN', '').split(',') if t.strip()] # Supports multiple tokens
     SPOTIFY_CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
     SPOTIFY_CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
     # ── Platform detection ──────────────────────────────────────────────────
@@ -82,10 +82,12 @@ class Config:
     FFMPEG_PATH: str = _find_ffmpeg()
 
     SKIP_VOTE_THRESHOLD = int(os.getenv('SKIP_VOTE_THRESHOLD', '50'))
+    OWNER_ID            = int(os.getenv('OWNER_ID', '697221105257021451'))
     DJ_ROLE_NAME        = os.getenv('DJ_ROLE_NAME', 'DJ')
     MAX_QUEUE_SIZE      = int(os.getenv('MAX_QUEUE_SIZE', '100'))
     DEFAULT_VOLUME      = int(os.getenv('DEFAULT_VOLUME', '50'))
     SSL_VERIFY          = os.getenv('SSL_VERIFY', 'true').lower() == 'true'
+    DASHBOARD_PORT      = int(os.getenv('DASHBOARD_PORT', '8080'))
 
     YTDL_FORMAT_OPTIONS = {
         'format': 'bestaudio/best',
@@ -103,11 +105,54 @@ class Config:
         'legacyserverconnect': True,
         'force-ipv4': True,
         'cachedir': False,
+        'preferredcodec': 'opus',
+        'youtube_include_dash_manifest': False,
+        'cookiefile': os.path.join(os.path.dirname(__file__), 'cookies.txt') if os.path.exists(os.path.join(os.path.dirname(__file__), 'cookies.txt')) else None,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios'],
+            }
+        },
     }
+
+    # Voice quality presets for YouTube audio formats
+    # Each preset defines: ytdl_format, bitrate, description
+    VOICE_QUALITY_PRESETS = {
+        'low': {
+            'ytdl_format': 'worstaudio/worst',
+            'bitrate': '48k',
+            'buffersize': '2M',
+            'description': 'Low quality - Bandwidth friendly',
+            'color': 0xff4444
+        },
+        'medium': {
+            'ytdl_format': 'bestaudio[abr<=128]/bestaudio/best',
+            'bitrate': '128k',
+            'buffersize': '3M',
+            'description': 'Medium quality - Balanced',
+            'color': 0xffaa00
+        },
+        'high': {
+            'ytdl_format': 'bestaudio[abr<=256]/bestaudio/best',
+            'bitrate': '256k',
+            'buffersize': '4M',
+            'description': 'High quality - Clear audio',
+            'color': 0x44aa44
+        },
+        'lossless': {
+            'ytdl_format': 'bestaudio/best',
+            'bitrate': '320k',
+            'buffersize': '6M',
+            'description': 'Best quality - Lossless if available',
+            'color': 0x4488ff
+        }
+    }
+
+    DEFAULT_QUALITY = 'medium'
 
     FFMPEG_OPTIONS = {
         'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-        'options': '-vn',
+        'options': '-vn -bufsize 4M',
     }
 
     @classmethod
@@ -138,11 +183,11 @@ class Config:
 
     @classmethod
     def validate(cls):
-        if not cls.DISCORD_TOKEN:
-            raise ValueError("DISCORD_TOKEN not set in .env")
+        if not cls.DISCORD_TOKENS:
+            raise ValueError("No DISCORD_TOKEN found in .env. Add one or more separated by commas.")
 
         info = cls.get_system_info()
         distro_label = " (Arch-based)" if info["arch_based"] else ""
         print(f"[Config] OS      : {info['os']}{distro_label}")
         print(f"[Config] Python  : {info['python']}")
-        print(f"[Config] FFmpeg  : {info['ffmpeg']}")
+        print(f"[Config] FFmpeg  : {info['ffmpeg']}")

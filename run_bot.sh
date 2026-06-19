@@ -25,5 +25,18 @@ if [ ! -f ".env" ]; then
 fi
 
 # ── Run the bot ──────────────────────────────────────────────
-echo "[run] Starting Discord Music Bot..."
-exec python bot.py
+while true; do
+    echo "[run] Starting Discord Music Bot..."
+    python bot.py
+    EXIT_CODE=$?
+
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo "[run] Manual restart requested. Resuming immediately..."
+    elif [ $EXIT_CODE -eq 130 ]; then
+        echo "[run] Interrupted by user. Exiting."
+        exit 0
+    else
+        echo "[run] Bot crashed (Exit Code: $EXIT_CODE). Restarting in 5 seconds..."
+        sleep 5
+    fi
+done

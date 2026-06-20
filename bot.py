@@ -1,4 +1,5 @@
 import discord
+
 from discord.ext import commands
 from discord import app_commands
 import asyncio
@@ -61,18 +62,18 @@ class MusicBot(commands.Bot):
     async def setup_hook(self):
         if self.is_primary:
             try:
-                # Bersihkan command di level Guild (sering jadi penyebab duplikat di menu)
+                # Clear guild-level commands (often causes duplicates in menu)
                 target_guild = discord.Object(id=1106192482083016726)
                 self.tree.clear_commands(guild=target_guild)
                 await self.tree.sync(guild=target_guild)
 
-                # Sync secara Global (hanya primary bot yang punya command di tree-nya)
+                # Sync globally (only primary bot has commands in its tree)
                 synced = await self.tree.sync()
                 print(f"Synced {len(synced)} global commands for PRIMARY bot: {self.user}")
             except Exception as e:
                 print(f"Error syncing for PRIMARY bot: {e}")
         else:
-            # Bot sekunder: pastikan tidak ada command yang terdaftar (guild maupun global)
+            # Secondary bots: ensure no commands are registered (guild or global)
             try:
                 target_guild = discord.Object(id=1106192482083016726)
                 self.tree.clear_commands(guild=target_guild)
@@ -136,18 +137,25 @@ soundcloud_client = SoundCloudClient()
 global_spotify = SpotifyClient(Config.SPOTIFY_CLIENT_ID, Config.SPOTIFY_CLIENT_SECRET)
 
 async def process_spotify_list(interaction, voice_client, guild_state, queries):
-    """Helper untuk memproses daftar lagu dari Spotify (URL atau Search)"""
+    """Process Spotify tracks with parallel fetching (up to 4 concurrent)."""
     await interaction.followup.send(f"⏳ Processing {len(queries)} tracks from Spotify...", ephemeral=True)
+
+    sem = asyncio.Semaphore(4)
     added = 0
-    for sq in queries[:50]:
+
+    async def _resolve(sq):
+        nonlocal added
         if len(guild_state.queue) >= Config.MAX_QUEUE_SIZE:
-            break
-        try:
-            source = await YTDLSource.from_url(f"ytsearch:{sq}", loop=interaction.client.loop, stream=True, requester=interaction.user)
-            if guild_state.add_to_queue(source):
-                added += 1
-        except Exception:
-            continue
+            return
+        async with sem:
+            try:
+                source = await YTDLSource.from_url(f"ytsearch:{sq}", loop=interaction.client.loop, stream=True, requester=interaction.user)
+                if guild_state.add_to_queue(source):
+                    added += 1
+            except Exception:
+                pass
+
+    await asyncio.gather(*[_resolve(sq) for sq in queries[:50]])
 
     if added > 0:
         already_playing = voice_client.is_playing() or voice_client.is_paused()
@@ -159,7 +167,7 @@ async def process_spotify_list(interaction, voice_client, guild_state, queries):
         await interaction.followup.send("❌ Could not load any tracks from that playlist.", ephemeral=True)
 
 def find_voice_client(guild_id: int):
-    """Mencari voice_client aktif di antara semua bot yang terhubung di server tersebut."""
+    """Find the active voice_client among all bots connected to this guild."""
     for b in all_bots:
         guild = b.get_guild(guild_id)
         if guild and guild.voice_client:
@@ -202,13 +210,12 @@ async def refresh_panel(guild: discord.Guild, guild_state, current_bot=None):
         return
 
     if not current_bot:
-        # Cari bot yang sedang aktif di guild ini untuk merefresh panel
         vc = find_voice_client(guild.id)
-        if vc: current_bot = vc.client
-        else: current_bot = all_bots[0] # Fallback
+        current_bot = vc.client if vc else all_bots[0]
 
+    cog = MusicCog(current_bot)
     embed = create_control_panel_embed(guild_state)
-    view  = ControlPanelView(MusicCog(current_bot), guild_state, timeout=None)
+    view  = ControlPanelView(cog, guild_state, timeout=None)
 
     try:
         await msg.edit(embed=embed, view=view)
@@ -218,6 +225,34 @@ async def refresh_panel(guild: discord.Guild, guild_state, current_bot=None):
 # ────────────────────────────────────────────── 
 # VOICE HELPERS 
 # ──────────────────────────────────────────────
+
+async def _parallel_load_tracks(tracks, interaction, guild_state, voice_client, max_tracks=50, success_msg="Added **{added}** tracks!"):
+    """Load multiple tracks in parallel with a concurrency limit. Returns added count."""
+    sem = asyncio.Semaphore(4)
+    added = 0
+
+    async def _load(track):
+        nonlocal added
+        if len(guild_state.queue) >= max_tracks:
+            return
+        async with sem:
+            try:
+                source = await YTDLSource.from_url(track["url"], loop=interaction.client.loop, stream=True, requester=interaction.user)
+                if guild_state.add_to_queue(source):
+                    added += 1
+            except Exception:
+                pass
+
+    await asyncio.gather(*[_load(t) for t in tracks])
+
+    if added == 0:
+        return 0
+
+    already_playing = voice_client.is_playing() or voice_client.is_paused()
+    if not already_playing:
+        await play_next_song(voice_client, guild_state, interaction.client.loop)
+    await refresh_panel(interaction.guild, guild_state, interaction.client)
+    return added
 
 async def ensure_voice(interaction: discord.Interaction):
     async def send_error(message: str):
@@ -272,7 +307,6 @@ async def ensure_voice(interaction: discord.Interaction):
         # Ambil objek channel dari perspektif bot yang dipilih
         bot_vc = target_bot.get_channel(user_vc.id)
         voice_client = await bot_vc.connect(timeout=60.0, reconnect=True)
-        await asyncio.sleep(1)
     elif voice_client.channel.id != user_vc.id:
         await send_error(f"❌ {target_bot.user.name} is already busy in another channel!")
         return None
@@ -444,16 +478,6 @@ class MusicCog:
 # HELPERS 
 # ──────────────────────────────────────────────
 
-def is_dj(member: discord.Member) -> bool:
-    """Check if member has DJ role or administrator permissions"""
-    if member.guild_permissions.administrator:
-        return True
-    dj_role_name = Config.DJ_ROLE_NAME.lower()
-    for role in member.roles:
-        if role.name.lower() == dj_role_name:
-            return True
-    return False
-
 def is_authorized(user: discord.Member) -> bool:
     """Check if user is OWNER OR IN A VOICE CHANNEL"""
     if user.id == Config.OWNER_ID:
@@ -512,7 +536,6 @@ async def join(interaction: discord.Interaction):
     voice_client = await ensure_voice(interaction)
     if voice_client:
         await interaction.response.send_message(f"✅ Joined **{voice_client.channel.name}**", ephemeral=True)
-
 @app_commands.command(name="play", description="Play music (YouTube, Spotify URL, or Spotify Playlist Name)")
 @app_commands.describe(query="Song name, URL, or 'playlist: judul playlist'")
 async def play(interaction: discord.Interaction, query: str):
@@ -597,14 +620,13 @@ async def search(interaction: discord.Interaction, query: str):
         sources = []
         if 'entries' in data:
             for entry in list(data['entries'])[:5]:
-                source = type('obj', (object,), {
+                sources.append(type('SongPreview', (), {
                     'title':     entry.get('title'),
                     'uploader':  entry.get('uploader'),
                     'duration':  entry.get('duration'),
                     'thumbnail': entry.get('thumbnail'),
-                    'data':      entry
-                })()
-                sources.append(source)
+                    'data':      entry,
+                })())
 
         if not sources:
             return await interaction.followup.send("❌ No results found!", ephemeral=True)
@@ -882,25 +904,31 @@ async def playlist_load(interaction: discord.Interaction, name: str):
     if not voice_client:
         return
 
+    await interaction.response.defer(ephemeral=True)
     playlist = get_playlist(interaction.guild_id, interaction.user.id, name)
     if not playlist:
-        return await interaction.response.send_message(f"❌ Playlist **{name}** not found!", ephemeral=True)
+        return await interaction.followup.send(f"❌ Playlist **{name}** not found!", ephemeral=True)
 
-    await interaction.response.defer(ephemeral=True)
     guild_state = get_guild_state(interaction.guild_id)
+    songs = playlist.get("songs", [])
+    sem = asyncio.Semaphore(4)
     added_count = 0
 
-    for song_data in playlist.get("songs", []):
-        try:
-            url = song_data.get("webpage_url") or song_data.get("url")
-            if url:
-                song = await YTDLSource.from_url(url, loop=interaction.client.loop, requester=interaction.user)
-                if guild_state.add_to_queue(song):
-                    added_count += 1
-        except Exception as e:
-            print(f"Error loading song: {e}")
-            continue
+    async def _load_song(song_data):
+        nonlocal added_count
+        if len(guild_state.queue) >= Config.MAX_QUEUE_SIZE:
+            return
+        async with sem:
+            try:
+                url = song_data.get("webpage_url") or song_data.get("url")
+                if url:
+                    song = await YTDLSource.from_url(url, loop=interaction.client.loop, requester=interaction.user)
+                    if guild_state.add_to_queue(song):
+                        added_count += 1
+            except Exception as e:
+                print(f"Error loading song: {e}")
 
+    await asyncio.gather(*[_load_song(s) for s in songs])
     await interaction.followup.send(f"✅ Loaded **{added_count}** songs from playlist **{name}**!", ephemeral=True)
 
     if not voice_client.is_playing() and guild_state.queue:
@@ -1250,6 +1278,25 @@ async def audio_filter(interaction: discord.Interaction, mode: app_commands.Choi
 
     await refresh_panel(interaction.guild, guild_state)
 
+@app_commands.command(name="crossfade", description="Set crossfade duration between songs (0 = off)")
+@app_commands.describe(seconds="Crossfade duration in seconds (0 to disable, max 10)")
+async def crossfade(interaction: discord.Interaction, seconds: int = 3):
+    if not is_authorized(interaction.user):
+        return await interaction.response.send_message("❌ You must be in a voice channel (or be owner) to use this command!", ephemeral=True)
+
+    if not 0 <= seconds <= 10:
+        return await interaction.response.send_message("❌ Crossfade must be between 0 and 10 seconds!", ephemeral=True)
+
+    guild_state = get_guild_state(interaction.guild_id)
+    guild_state.crossfade_seconds = seconds
+
+    if seconds == 0:
+        msg = "❌ Crossfade disabled."
+    else:
+        msg = f"🎧 Crossfade set to **{seconds}s** between songs."
+
+    await interaction.response.send_message(msg, ephemeral=True)
+
 @app_commands.command(name="restart", description="Restart the bot fully (Owner Only)")
 @app_commands.default_permissions(administrator=True)
 async def restart_bot(interaction: discord.Interaction):
@@ -1429,27 +1476,10 @@ async def artist_radio(interaction: discord.Interaction, name: str):
         if not tracks:
             return await interaction.followup.send(f"❌ No artist radio found for **{name}**!", ephemeral=True)
 
-        added = 0
-        for track in tracks:
-            if len(guild_state.queue) >= 20:
-                break
-            try:
-                source = await YTDLSource.from_url(track["url"], loop=interaction.client.loop, stream=True, requester=interaction.user)
-                if guild_state.add_to_queue(source):
-                    added += 1
-            except Exception:
-                continue
-
+        added = await _parallel_load_tracks(tracks, interaction, guild_state, voice_client, max_tracks=20)
         if added == 0:
             return await interaction.followup.send("❌ Failed to load tracks!", ephemeral=True)
-
-        already_playing = voice_client.is_playing() or voice_client.is_paused()
         await interaction.followup.send(f"📻 Added **{added}** songs from **{name}** radio!", ephemeral=True)
-
-        if not already_playing:
-            await play_next_song(voice_client, guild_state, interaction.client.loop)
-
-        await refresh_panel(interaction.guild, guild_state, interaction.client)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
@@ -1501,27 +1531,10 @@ async def mood_play(interaction: discord.Interaction, mood: str):
         if not tracks:
             return await interaction.followup.send("❌ No tracks found for this mood!", ephemeral=True)
 
-        added = 0
-        for track in tracks:
-            if len(guild_state.queue) >= 15:
-                break
-            try:
-                source = await YTDLSource.from_url(track["url"], loop=interaction.client.loop, stream=True, requester=interaction.user)
-                if guild_state.add_to_queue(source):
-                    added += 1
-            except Exception:
-                continue
-
+        added = await _parallel_load_tracks(tracks, interaction, guild_state, voice_client, max_tracks=15)
         if added == 0:
             return await interaction.followup.send("❌ Failed to load tracks!", ephemeral=True)
-
-        already_playing = voice_client.is_playing() or voice_client.is_paused()
         await interaction.followup.send(f"🎭 Added **{added}** songs for mood: **{mood}**!", ephemeral=True)
-
-        if not already_playing:
-            await play_next_song(voice_client, guild_state, interaction.client.loop)
-
-        await refresh_panel(interaction.guild, guild_state, interaction.client)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
@@ -1555,27 +1568,10 @@ async def ytplaylist(interaction: discord.Interaction, playlist_id: str):
 
         await interaction.followup.send(f"⏳ Loading {len(tracks)} tracks...", ephemeral=True)
 
-        added = 0
-        for track in tracks:
-            if len(guild_state.queue) >= Config.MAX_QUEUE_SIZE:
-                break
-            try:
-                source = await YTDLSource.from_url(track["url"], loop=interaction.client.loop, stream=True, requester=interaction.user)
-                if guild_state.add_to_queue(source):
-                    added += 1
-            except Exception:
-                continue
-
+        added = await _parallel_load_tracks(tracks, interaction, guild_state, voice_client)
         if added == 0:
             return await interaction.followup.send("❌ Failed to load any tracks!", ephemeral=True)
-
-        already_playing = voice_client.is_playing() or voice_client.is_paused()
         await interaction.channel.send(f"📋 Loaded **{added}** songs from playlist!", delete_after=10)
-
-        if not already_playing:
-            await play_next_song(voice_client, guild_state, interaction.client.loop)
-
-        await refresh_panel(interaction.guild, guild_state, interaction.client)
 
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
@@ -1687,7 +1683,6 @@ async def handle_message_request(current_bot, message):
     voice_client = message.guild.voice_client
     if voice_client is None:
         voice_client = await message.author.voice.channel.connect(timeout=60.0)
-        await asyncio.sleep(1)
 
     loading_msg = await message.channel.send(f"🔍 Searching for **{query[:50]}**...")
 
@@ -1697,7 +1692,7 @@ async def handle_message_request(current_bot, message):
             spotify_queries = await current_bot.loop.run_in_executor(None, handle_spotify_urls_sync, query)
             if not spotify_queries:
                 await loading_msg.edit(content="❌ Failed to resolve Spotify link or it's empty.")
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
                 await loading_msg.delete()
                 return
 
@@ -1714,13 +1709,13 @@ async def handle_message_request(current_bot, message):
 
             if added == 0:
                 await loading_msg.edit(content="❌ Failed to load Spotify tracks!")
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
                 await loading_msg.delete()
                 return
 
             already_playing = voice_client.is_playing() or voice_client.is_paused()
             await loading_msg.edit(content=f"🎵 Added **{added}** tracks from Spotify by {message.author.mention}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
             await loading_msg.delete()
 
             if not already_playing:
@@ -1744,14 +1739,14 @@ async def handle_message_request(current_bot, message):
 
         if not guild_state.add_to_queue(source):
             await loading_msg.edit(content=f"❌ Queue is full!")
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
             await loading_msg.delete()
             return
 
         pos = len(guild_state.queue)
         dur = source.format_duration() if source.duration else "?:??"
         await loading_msg.edit(content=f"✅ **{source.title[:60]}** — `{dur}` added to queue #{pos} by {message.author.mention}")
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
         await loading_msg.delete()
 
         if not already_playing:
@@ -1761,7 +1756,7 @@ async def handle_message_request(current_bot, message):
 
     except Exception as e:
         await loading_msg.edit(content=f"❌ Error: {str(e)[:100]}")
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
         await loading_msg.delete()
 
 async def handle_voice_update(current_bot, member, before, after):
@@ -1821,7 +1816,7 @@ if __name__ == '__main__':
         mood_play, ytplaylist, controlpanel, join, play, search,
         soundcloud_play, soundcloud_search, skip, forceskip, pause,
         resume, stop, show_queue, nowplaying, volume, remove,
-        move, shuffle, clear, leave, help_command, audio_filter, lyrics, restart_bot, shutdown_bot,
+        move, shuffle, clear, leave, help_command, audio_filter, lyrics, crossfade, restart_bot, shutdown_bot,
         playlist_create, playlist_save, playlist_load, playlist_list, playlist_delete,
         backup, backup_list, restore, backup_delete, quality,
         rec_reset, rec_stats

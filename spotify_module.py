@@ -42,7 +42,7 @@ class SpotifyClient:
             return None
 
     def search_playlist_queries(self, query: str) -> List[str]:
-        """Mencari playlist secara global berdasarkan nama dan mengambil track-nya."""
+        """Search for playlists globally by name and return their tracks."""
         if not self.enabled or not self.client:
             return []
         try:

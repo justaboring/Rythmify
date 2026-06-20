@@ -1,4 +1,10 @@
 import asyncio
+import math
+import random
+import re
+import struct
+import time
+import traceback
 import discord
 import yt_dlp as youtube_dl
 from config import Config
@@ -28,8 +34,15 @@ ytdl = youtube_dl.YoutubeDL(Config.YTDL_FORMAT_OPTIONS)
 
 # guild_id -> prefetched YTDLSource (next song ready to play)
 _prefetch_cache: dict = {}
-# Limit cache size to prevent memory bloat
 MAX_CACHE_SIZE = 10
+
+
+def _cache_put(guild_id, source):
+    """Add a source to the prefetch cache, evicting oldest if full."""
+    if len(_prefetch_cache) >= MAX_CACHE_SIZE:
+        oldest_key = next(iter(_prefetch_cache))
+        _prefetch_cache.pop(oldest_key)
+    _prefetch_cache[guild_id] = source
 
 async def prefetch_next(guild_state, bot_loop):
     """Pre-fetch the next song in queue in background."""
@@ -41,12 +54,7 @@ async def prefetch_next(guild_state, bot_loop):
         try:
             print(f"Pre-fetching: {next_song.title}")
             refreshed = await YTDLSource.refresh(next_song, loop=bot_loop)
-            # Manage cache size
-            if len(_prefetch_cache) >= MAX_CACHE_SIZE:
-                # Remove oldest entry
-                oldest_key = next(iter(_prefetch_cache))
-                _prefetch_cache.pop(oldest_key)
-            _prefetch_cache[guild_state.guild_id] = refreshed
+            _cache_put(guild_state.guild_id, refreshed)
             print(f"Pre-fetch done: {refreshed.title}")
         except Exception as e:
             print(f"Pre-fetch failed: {e}")
@@ -59,15 +67,89 @@ async def _prefetch_autoplay(guild_state, current_song, bot_loop):
         print(f"Pre-fetching autoplay suggestion...")
         auto_song = await fetch_autoplay_suggestion(current_song, bot_loop, guild_state.history, guild_state.song_history)
         if auto_song and not _prefetch_cache.get(guild_state.guild_id):
-            # Manage cache size
-            if len(_prefetch_cache) >= MAX_CACHE_SIZE:
-                # Remove oldest entry
-                oldest_key = next(iter(_prefetch_cache))
-                _prefetch_cache.pop(oldest_key)
-            _prefetch_cache[guild_state.guild_id] = auto_song
+            _cache_put(guild_state.guild_id, auto_song)
             print(f"Autoplay pre-fetch done: {auto_song.title}")
     except Exception as e:
         print(f"Autoplay pre-fetch failed: {e}")
+
+
+class CrossfadeSource(discord.AudioSource):
+    """Crossfade between two audio sources over a given duration."""
+    SAMPLE_WIDTH = 2   # 16-bit PCM
+    CHANNELS     = 2   # stereo
+
+    def __init__(self, source_a, source_b, duration=3.0, volume=0.5):
+        self.source_a       = source_a   # fading out
+        self.source_b       = source_b   # fading in
+        self.duration       = max(duration, 0.5)
+        self.volume         = volume
+        self._started       = time.time()
+        self._finished      = False
+        self._fade_complete = False  # True once fade is done, still reading source_b
+
+    def read(self):
+        if self._finished:
+            return b''
+
+        # After fade completes, just play source_b at full volume
+        if self._fade_complete:
+            data = self.source_b.read()
+            if not data:
+                self._finished = True
+                return b''
+            return self._scale(data, self.volume)
+
+        elapsed  = time.time() - self._started
+        progress = min(elapsed / self.duration, 1.0)
+        fade_out = max(0.0, 1.0 - progress)
+        fade_in  = progress
+
+        data_a = self.source_a.read()
+        data_b = self.source_b.read()
+
+        # Both ended
+        if not data_a and not data_b:
+            self._finished = True
+            return b''
+
+        # source_a ended — transition to source_b-only mode
+        if not data_a:
+            self._fade_complete = True
+            return self._scale(data_b, self.volume)
+
+        # source_b ended early (shouldn't happen normally)
+        if not data_b:
+            return self._scale(data_a, self.volume * fade_out)
+
+        # Both active — blend
+        samples_a = struct.unpack(f'<{len(data_a) // self.SAMPLE_WIDTH}h', data_a)
+        samples_b = struct.unpack(f'<{len(data_b) // self.SAMPLE_WIDTH}h', data_b)
+        count = min(len(samples_a), len(samples_b))
+        mixed = [
+            int(samples_a[i] * fade_out * self.volume + samples_b[i] * fade_in * self.volume)
+            for i in range(count)
+        ]
+        mixed = [max(-32768, min(32767, s)) for s in mixed]
+        return struct.pack(f'<{count}h', *mixed)
+
+    @staticmethod
+    def _scale(data, vol):
+        samples = struct.unpack(f'<{len(data) // 2}h', data)
+        scaled  = [max(-32768, min(32767, int(s * vol))) for s in samples]
+        return struct.pack(f'<{len(scaled)}h', *scaled)
+
+    def cleanup(self):
+        try:
+            if hasattr(self.source_a, 'cleanup'):
+                self.source_a.cleanup()
+        except Exception:
+            pass
+        try:
+            if hasattr(self.source_b, 'cleanup'):
+                self.source_b.cleanup()
+        except Exception:
+            pass
+
 
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
@@ -101,34 +183,14 @@ class YTDLSource(discord.PCMVolumeTransformer):
             data = data['entries'][0]
 
         filename = data['url'] if stream else ytdl.prepare_filename(data)
-
-        print(f"Extracted audio URL for: {data.get('title', 'Unknown')}")
-        print(f"Format: {data.get('format', 'Unknown')}")
-        print(f"Protocol: {data.get('protocol', 'Unknown')}")
-        if filename:
-            print(f"URL starts with: {filename[:60]}...")
+        print(f"Extracted: {data.get('title', 'Unknown')} ({data.get('format', '?')})")
 
         # Build FFmpeg options with quality-specific buffer
-        quality_preset = quality_preset or Config.DEFAULT_QUALITY
-        preset_config = Config.VOICE_QUALITY_PRESETS.get(quality_preset, Config.VOICE_QUALITY_PRESETS[Config.DEFAULT_QUALITY])
-        buffer_size = preset_config['buffersize']
-        bitrate = preset_config['bitrate']
-
-        base_options_list = ['-vn', '-bufsize', buffer_size]
-
-        # Add bitrate constraint for consistent output
-        base_options_list.extend(['-b:a', bitrate])
-
-        # Handle filters properly: combine into a single -af flag
         active_filter = None
         if requester and hasattr(requester, 'guild'):
-            st = get_guild_state(requester.guild.id)
-            active_filter = st.active_filter
+            active_filter = get_guild_state(requester.guild.id).active_filter
 
-        if active_filter:
-            base_options_list.extend(['-af', active_filter])
-
-        base_options = ' '.join(base_options_list)
+        base_options = cls._build_ffmpeg_options(quality_preset, active_filter)
 
         try:
             ffmpeg_audio = discord.FFmpegPCMAudio(
@@ -144,6 +206,16 @@ class YTDLSource(discord.PCMVolumeTransformer):
         source = cls(ffmpeg_audio, data=data)
         source.requester = requester
         return source
+
+    @staticmethod
+    def _build_ffmpeg_options(quality_preset=None, active_filter=None):
+        """Build FFmpeg options string from quality preset and filter."""
+        preset = quality_preset or Config.DEFAULT_QUALITY
+        cfg = Config.VOICE_QUALITY_PRESETS.get(preset, Config.VOICE_QUALITY_PRESETS[Config.DEFAULT_QUALITY])
+        opts = ['-vn', '-bufsize', cfg['buffersize'], '-b:a', cfg['bitrate']]
+        if active_filter:
+            opts.extend(['-af', active_filter])
+        return ' '.join(opts)
 
     @classmethod
     def _pick_best(cls, entries, query):
@@ -162,7 +234,6 @@ class YTDLSource(discord.PCMVolumeTransformer):
             if duration < 30 or duration > 1500:
                 continue
 
-            import math
             view_score      = math.log10(views + 1) * 2.5 if views > 0 else 0
             matched         = sum(1 for w in query_words if w in title)
             relevance_score = (matched / max(len(query_words), 1)) * 25
@@ -233,24 +304,17 @@ class YTDLSource(discord.PCMVolumeTransformer):
         stream_url = data['url']
 
         # Rebuild options with current filters and quality
-        quality_preset = quality_preset or Config.DEFAULT_QUALITY
-        preset_config = Config.VOICE_QUALITY_PRESETS.get(quality_preset, Config.VOICE_QUALITY_PRESETS[Config.DEFAULT_QUALITY])
-        buffer_size = preset_config['buffersize']
-        bitrate = preset_config['bitrate']
-
-        ffmpeg_opts = ['-vn', '-bufsize', buffer_size, '-b:a', bitrate]
-
         state = get_guild_state(song.requester.guild.id) if song.requester else None
-        if state and state.active_filter:
-            ffmpeg_opts.extend(['-af', state.active_filter])
+        active_filter = state.active_filter if state else None
+        ffmpeg_options = cls._build_ffmpeg_options(quality_preset, active_filter)
 
-        print(f"Refreshed stream URL for: {data.get('title', 'Unknown')}")
+        print(f"Refreshed: {data.get('title', 'Unknown')}")
 
         ffmpeg_audio = discord.FFmpegPCMAudio(
             stream_url,
             executable=Config.FFMPEG_PATH,
             before_options=Config.FFMPEG_OPTIONS.get('before_options', ''),
-            options=' '.join(ffmpeg_opts)
+            options=ffmpeg_options
         )
 
         refreshed           = cls(ffmpeg_audio, data=data, volume=song.volume)
@@ -276,10 +340,12 @@ class GuildMusicState:
         self.song_start_time     = None
         self.pause_start_time    = None
         self.paused_duration     = 0
-        self.active_filter       = None # format: filter string
+        self.active_filter       = None  # format: filter string
+        self.crossfade_seconds   = Config.CROSSFADE_SECONDS
+        self._crossfade_task     = None
+        self._crossfade_consumed_next = False
 
     def get_elapsed(self):
-        import time
         if self.song_start_time is None:
             return 0
         
@@ -314,13 +380,16 @@ class GuildMusicState:
         return False
 
     def shuffle(self):
-        import random
         random.shuffle(self.queue)
 
     def clear(self):
         self.queue.clear()
         self.skip_votes.clear()
         self.song_history.clear()
+        self._crossfade_consumed_next = False
+        if self._crossfade_task and not self._crossfade_task.done():
+            self._crossfade_task.cancel()
+        self._crossfade_task = None
         _prefetch_cache.pop(self.guild_id, None)
 
     def get_queue_text(self, start=0, count=10):
@@ -353,7 +422,6 @@ async def fetch_autoplay_suggestion(song, loop, history, song_history=None):
         ytm = ytmusicapi.YTMusic()
         video_id = song.data.get('id')
         if not video_id:
-            import re
             url = song.webpage_url or song.url or ""
             match = re.search(r"v=([a-zA-Z0-9_-]+)", url)
             if match:
@@ -401,7 +469,6 @@ async def fetch_autoplay_suggestion(song, loop, history, song_history=None):
                 candidates.append((score, track))
 
             if candidates:
-                import random
                 # Sort by score and pick from top 10 for high-quality transitions
                 candidates.sort(key=lambda x: x[0], reverse=True)
                 top_pool = candidates[:10]
@@ -417,15 +484,134 @@ async def fetch_autoplay_suggestion(song, loop, history, song_history=None):
         return await YTDLSource.from_url(next_url, loop=loop, requester=song.requester)
     return None
 
+async def _crossfade_timer(voice_client, guild_state, bot_loop):
+    """Wait until near end of current song, then start crossfade into the next track."""
+    try:
+        song = guild_state.current_song
+        if not song or not song.duration:
+            return
+
+        duration = song.duration
+        crossfade_secs = guild_state.crossfade_seconds
+
+        # Skip crossfade for very short songs
+        if duration < crossfade_secs * 2:
+            return
+
+        # Wait until (crossfade_secs) before the song ends
+        wait_time = max(duration - crossfade_secs, 1)
+        await asyncio.sleep(wait_time)
+
+        # Bail if song was skipped/stopped while we slept
+        if guild_state.current_song != song:
+            return
+        if not voice_client.is_playing() or voice_client.is_paused():
+            return
+
+        # Determine next track
+        next_song = None
+        if guild_state.queue:
+            next_song = guild_state.queue.pop(0)
+        elif guild_state.autoplay and guild_state.current_song:
+            print("[Crossfade] Fetching autoplay suggestion...")
+            next_song = await fetch_autoplay_suggestion(
+                guild_state.current_song, bot_loop,
+                guild_state.history, guild_state.song_history
+            )
+
+        if not next_song:
+            return
+
+        # Refresh/load the next song stream
+        if not hasattr(next_song, 'original') or next_song.original is None:
+            try:
+                next_song = await YTDLSource.refresh(next_song, loop=bot_loop)
+            except Exception as e:
+                print(f"[Crossfade] Failed to refresh next song: {e}")
+                # Put it back in queue so normal transition handles it
+                if guild_state.queue or guild_state.autoplay:
+                    pass  # already popped, can't undo cleanly
+                return
+
+        # Build the crossfade source
+        current_source = voice_client.source
+        if not current_source:
+            return
+
+        crossfade_source = CrossfadeSource(
+            current_source, next_song,
+            duration=crossfade_secs,
+            volume=guild_state.volume
+        )
+
+        # Record history for next_song
+        v_id = next_song.data.get('id')
+        if not v_id:
+            url = next_song.webpage_url or next_song.url or ""
+            m = re.search(r"v=([a-zA-Z0-9_-]+)", url)
+            if m:
+                v_id = m.group(1)
+        if v_id and v_id not in guild_state.history:
+            guild_state.history.append(v_id)
+            if len(guild_state.history) > 50:
+                guild_state.history.pop(0)
+
+        # Save current song to song_history for prev button
+        if guild_state.current_song:
+            guild_state.song_history.append(guild_state.current_song)
+            if len(guild_state.song_history) > 10:
+                guild_state.song_history.pop(0)
+
+        # Swap source — player thread picks this up on the next read cycle
+        guild_state.current_song = next_song
+        guild_state._crossfade_consumed_next = True
+        voice_client._source = crossfade_source
+
+        # Re-arm the after callback so play_next_song fires when crossfade finishes
+        def after_crossfade(error):
+            if error:
+                print(f"[Crossfade] Player error: {error}")
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    play_next_song(voice_client, guild_state, bot_loop),
+                    bot_loop
+                )
+            except Exception as e:
+                print(f"[Crossfade] Error scheduling next song: {e}")
+
+        voice_client._after = after_crossfade
+        print(f"[Crossfade] Started crossfade into: {next_song.title}")
+
+    except asyncio.CancelledError:
+        pass  # Expected when song is skipped/stopped
+    except Exception as e:
+        print(f"[Crossfade] Error: {e}")
+        traceback.print_exc()
+
+
 async def play_next_song(voice_client, guild_state, bot_loop):
     from stats_store import record_play
+
+    # Cancel any pending crossfade task
+    if guild_state._crossfade_task and not guild_state._crossfade_task.done():
+        guild_state._crossfade_task.cancel()
+    guild_state._crossfade_task = None
 
     loop_mode = guild_state.loop_mode
     previous_song = guild_state.current_song
 
-    if loop_mode == 'one' and guild_state.current_song:
+    if guild_state._crossfade_consumed_next:
+        # Crossfade timer already set current_song and loaded its stream
+        guild_state._crossfade_consumed_next = False
         next_song = guild_state.current_song
+        from_crossfade = True
+        if loop_mode == 'all' and previous_song and previous_song != next_song:
+            guild_state.queue.append(previous_song)
+    elif loop_mode == 'one' and guild_state.current_song:
+        next_song = guild_state.current_song
+        from_crossfade = False
     elif guild_state.queue:
+        from_crossfade = False
         # Check prefetch cache first
         cached = _prefetch_cache.pop(guild_state.guild_id, None)
         queued = guild_state.queue.pop(0)
@@ -444,6 +630,7 @@ async def play_next_song(voice_client, guild_state, bot_loop):
         if loop_mode == 'all' and guild_state.current_song:
             guild_state.queue.append(guild_state.current_song)
     else:
+        from_crossfade = False
         if loop_mode == 'all' and guild_state.current_song:
             next_song = guild_state.current_song
         elif guild_state.autoplay and guild_state.current_song:
@@ -480,7 +667,6 @@ async def play_next_song(voice_client, guild_state, bot_loop):
     # Record history
     v_id = next_song.data.get('id')
     if not v_id:
-        import re
         url = next_song.webpage_url or next_song.url or ""
         match = re.search(r"v=([a-zA-Z0-9_-]+)", url)
         if match:
@@ -526,19 +712,21 @@ async def play_next_song(voice_client, guild_state, bot_loop):
             return
 
         print(f"Starting playback: {next_song.title}")
-        import time
         guild_state.song_start_time  = time.time()
         guild_state.paused_duration  = 0
         guild_state.pause_start_time = None
 
-        # ── FIX #3: Better error handling ──────────────────────────────────────
-        if next_song and hasattr(next_song, 'read'):
-            voice_client.play(next_song, after=after_playing)
+        if from_crossfade:
+            # CrossfadeSource is already playing — don't restart playback
+            print(f"[Crossfade] Continuing playback: {next_song.title}")
         else:
-            raise Exception("Invalid audio source. Ensure FFmpeg is working correctly and cookies.txt exists if needed.")
+            if next_song and hasattr(next_song, 'read'):
+                voice_client.play(next_song, after=after_playing)
+            else:
+                raise Exception("Invalid audio source. Ensure FFmpeg is working correctly and cookies.txt exists if needed.")
 
-        if hasattr(voice_client.source, 'volume') and voice_client.source.volume is not None:
-            voice_client.source.volume = guild_state.volume
+            if hasattr(voice_client.source, 'volume') and voice_client.source.volume is not None:
+                voice_client.source.volume = guild_state.volume
 
         record_play(
             guild_state.guild_id,
@@ -570,7 +758,14 @@ async def play_next_song(voice_client, guild_state, bot_loop):
                 bot_loop
             )
 
+        # Schedule crossfade timer if enabled
+        if (guild_state.crossfade_seconds > 0
+                and next_song.duration
+                and (guild_state.queue or guild_state.autoplay)):
+            guild_state._crossfade_task = asyncio.ensure_future(
+                _crossfade_timer(voice_client, guild_state, bot_loop)
+            )
+
     except Exception as e:
         print(f"Error starting playback: {e}")
-        import traceback
         traceback.print_exc()

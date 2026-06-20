@@ -280,7 +280,12 @@ class ControlPanelView(discord.ui.View):
         await self.music_cog.dashboard_callback(interaction)
 
     def update_pause_button(self, is_paused: bool):
-        pass
+        """Update pause button label based on current state (called externally if needed)."""
+        for child in self.children:
+            if getattr(child, 'custom_id', None) == "cp_pause":
+                child.label = "Resume" if is_paused else "Pause"
+                child.emoji = discord.PartialEmoji(name="▶️") if is_paused else discord.PartialEmoji(name="⏸️")
+                child.style = discord.ButtonStyle.secondary if is_paused else discord.ButtonStyle.primary
 
 
 NowPlayingView = ControlPanelView

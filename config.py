@@ -86,6 +86,7 @@ class Config:
     DJ_ROLE_NAME        = os.getenv('DJ_ROLE_NAME', 'DJ')
     MAX_QUEUE_SIZE      = int(os.getenv('MAX_QUEUE_SIZE', '100'))
     DEFAULT_VOLUME      = int(os.getenv('DEFAULT_VOLUME', '50'))
+    CROSSFADE_SECONDS   = int(os.getenv('CROSSFADE_SECONDS', '0'))  # 0 = disabled
     SSL_VERIFY          = os.getenv('SSL_VERIFY', 'true').lower() == 'true'
     DASHBOARD_PORT      = int(os.getenv('DASHBOARD_PORT', '8080'))
 

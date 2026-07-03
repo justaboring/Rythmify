@@ -82,7 +82,7 @@ class Config:
     FFMPEG_PATH: str = _find_ffmpeg()
 
     SKIP_VOTE_THRESHOLD = int(os.getenv('SKIP_VOTE_THRESHOLD', '50'))
-    OWNER_ID            = int(os.getenv('OWNER_ID', '697221105257021451'))
+    OWNER_ID            = int(os.getenv('OWNER_ID', 'your_id'))
     DJ_ROLE_NAME        = os.getenv('DJ_ROLE_NAME', 'DJ')
     MAX_QUEUE_SIZE      = int(os.getenv('MAX_QUEUE_SIZE', '100'))
     DEFAULT_VOLUME      = int(os.getenv('DEFAULT_VOLUME', '50'))

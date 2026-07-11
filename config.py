@@ -88,7 +88,6 @@ class Config:
     DEFAULT_VOLUME      = int(os.getenv('DEFAULT_VOLUME', '50'))
     CROSSFADE_SECONDS   = int(os.getenv('CROSSFADE_SECONDS', '0'))  # 0 = disabled
     SSL_VERIFY          = os.getenv('SSL_VERIFY', 'true').lower() == 'true'
-    DASHBOARD_PORT      = int(os.getenv('DASHBOARD_PORT', '8080'))
 
     YTDL_FORMAT_OPTIONS = {
         'format': 'bestaudio/best',

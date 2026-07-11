@@ -18,7 +18,7 @@ from admin_module import is_dj, can_skip, SkipVoteManager, remove_from_queue, mo
 from ui_components import (
     NowPlayingView, QueueView, SkipVoteView, SongSelectView,
     create_now_playing_embed, create_queue_embed, create_added_embed,
-    ControlPanelView, create_control_panel_embed, create_dashboard_embed
+    ControlPanelView, create_control_panel_embed
 )
 from panel_store import get_panel, set_panel, clear_panel
 from request_channel_store import get_request_channel, set_request_channel, clear_request_channel
@@ -29,7 +29,6 @@ from ytmusic_module import (
     get_playlist_tracks, track_to_source_data
 )
 from spotify_module import SpotifyClient
-from web_dashboard import start_dashboard
 from playlist_store import (
     create_playlist, save_queue_as_playlist, get_playlist,
     get_user_playlists, delete_playlist, add_to_playlist, remove_from_playlist
@@ -326,17 +325,6 @@ class MusicCog:
     def get_voice_client(self, guild_id: int):
         return find_voice_client(guild_id)
 
-    async def dashboard_callback(self, interaction: discord.Interaction):
-        guild_state  = get_guild_state(interaction.guild_id)
-        voice_client = find_voice_client(interaction.guild_id)
-        embed = create_dashboard_embed(guild_state, voice_client=voice_client, guild=interaction.guild)
-
-        # Provide the Web Dashboard link for the specific guild
-        url = f"http://localhost:{Config.DASHBOARD_PORT}/guild/{interaction.guild_id}"
-        content = f"🌐 **Web Dashboard Access**\nView real-time monitoring and full queue here:\n{url}\n\n*(Note: If accessing remotely, replace 'localhost' with your server's IP address)*"
-
-        await interaction.response.send_message(content=content, embed=embed, ephemeral=True)
-
     async def pause_callback(self, interaction: discord.Interaction):
         voice_client = find_voice_client(interaction.guild_id)
         guild_state  = get_guild_state(interaction.guild_id)
@@ -533,21 +521,6 @@ async def periodic_audit_flush(interval: int = 30):
 
 
 # ── Spotify Connect Imports ──────────────────────────────────────────────
-
-try:
-    from spotify_auth import (
-        has_user_token, get_user_token, remove_user_token,
-        build_authorize_url, wait_for_callback,
-        start_callback_server, refresh_user_token,
-    )
-    _SPOTIFY_AUTH_AVAILABLE = True
-except ImportError:
-    _SPOTIFY_AUTH_AVAILABLE = False
-    print("[bot] spotify_auth.py not found — Spotify Connect commands disabled")
-
-# ────────────────────────────────────────────── 
-# COMMANDS 
-# ──────────────────────────────────────────────
 
 @app_commands.command(name="controlpanel", description="Toggle persistent music control panel in this channel (DJ/Admin only)")
 async def controlpanel(interaction: discord.Interaction):
@@ -1253,151 +1226,7 @@ async def help_command(interaction: discord.Interaction):
 
     # Spotify Connect
     spotify_cmds = [
-        ("/spotify_connect",     "Link your Spotify account"),
-        ("/spotify_token",       "Complete OAuth verification"),
-        ("/spotify_disconnect",  "Unlink Spotify account"),
-        ("/spotify_status",      "Check connection status"),
     ]
-    embed.add_field(name="🎧 Spotify Connect", value="\n".join([f"**{cmd}**: {desc}" for cmd, desc in spotify_cmds]), inline=False)
-
-    # Backup/Restore (Owner only)
-    if interaction.user.id == Config.OWNER_ID:
-        backup_cmds = [
-            ("/backup",               "Create a backup"),
-            ("/backup_list",          "List all backups"),
-            ("/restore <name>",       "Restore from backup"),
-            ("/backup_delete <name>", "Delete a backup"),
-        ]
-        embed.add_field(name="📦 Backup", value="\n".join([f"**{cmd}**: {desc}" for cmd, desc in backup_cmds]), inline=False)
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-# ──────────────────────────────────────────────
-# SPOTIFY CONNECT COMMANDS
-# ──────────────────────────────────────────────
-
-@app_commands.command(name="spotify_connect", description="Link your Spotify account for Spotify Connect control")
-async def spotify_connect(interaction: discord.Interaction):
-    """Start OAuth to link a Spotify account for Connect control."""
-    if not _SPOTIFY_AUTH_AVAILABLE:
-        return await interaction.response.send_message("❌ Spotify Connect not available (spotify_auth.py missing).", ephemeral=True)
-    if not Config.SPOTIFY_CLIENT_ID or not Config.SPOTIFY_CLIENT_SECRET:
-        return await interaction.response.send_message("❌ SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET not configured.", ephemeral=True)
-
-    if not await rate_limit_check(interaction):
-        return
-
-    # Check if already linked
-    if has_user_token(interaction.user.id):
-        await interaction.response.send_message(
-            "🔗 Your Spotify account is already linked!\n"
-            "Use `/spotify status` to check connection.\n"
-            "Use `/spotify reconnect` to re-link.",
-            ephemeral=True
-        )
-        return
-
-    auth_url = build_authorize_url(interaction.user.id)
-    await interaction.response.send_message(
-        f"🔗 **Link your Spotify account**\n\n"
-        f"1. Click this link to authorize:\n"
-        f"   {auth_url}\n\n"
-        f"2. After authorizing, you'll see a success page.\n"
-        f"3. Then run `/spotify token` to verify the connection.\n\n"
-        f"_The link expires in 2 minutes._",
-        ephemeral=True
-    )
-
-
-@app_commands.command(name="spotify_token", description="Complete Spotify OAuth and verify your connection")
-async def spotify_token(interaction: discord.Interaction):
-    """Wait for the OAuth callback and verify the stored token."""
-    if not _SPOTIFY_AUTH_AVAILABLE:
-        return await interaction.response.send_message("❌ Spotify Connect not available.", ephemeral=True)
-
-    if not await rate_limit_check(interaction):
-        return
-
-    # Check if already linked
-    if has_user_token(interaction.user.id):
-        await interaction.response.send_message("✅ Your Spotify account is already linked!", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-
-    # Wait for the OAuth callback (user should have already authorized)
-    success = await wait_for_callback(interaction.user.id, timeout=30.0)
-    if success:
-        await interaction.followup.send(
-            "✅ **Spotify account linked!**\n\n"
-            "Use `/spotify status` to see your connection.\n"
-            "Use `/spotify disconnect` to unlink.",
-            ephemeral=True
-        )
-    else:
-        await interaction.followup.send(
-            "❌ No OAuth callback received.\n\n"
-            "Make sure you:\n"
-            "1. Ran `/spotify connect` and clicked the link\n"
-            "2. Authorized in your browser\n"
-            "3. Ran `/spotify token` within 2 minutes",
-            ephemeral=True
-        )
-
-
-@app_commands.command(name="spotify_disconnect", description="Unlink your Spotify account")
-async def spotify_disconnect(interaction: discord.Interaction):
-    """Remove stored Spotify token for this user."""
-    if not _SPOTIFY_AUTH_AVAILABLE:
-        return await interaction.response.send_message("❌ Spotify Connect not available.", ephemeral=True)
-
-    if not await rate_limit_check(interaction):
-        return
-
-    if remove_user_token(interaction.user.id):
-        await interaction.response.send_message("🗑️ Your Spotify account has been unlinked.", ephemeral=True)
-    else:
-        await interaction.response.send_message("❌ No linked Spotify account found.", ephemeral=True)
-
-
-@app_commands.command(name="spotify_status", description="Check your Spotify Connect connection status")
-async def spotify_status(interaction: discord.Interaction):
-    """Show whether the user has a linked Spotify account and token info."""
-    if not _SPOTIFY_AUTH_AVAILABLE:
-        return await interaction.response.send_message("❌ Spotify Connect not available.", ephemeral=True)
-
-    if not await rate_limit_check(interaction):
-        return
-
-    if not Config.SPOTIFY_CLIENT_ID or not Config.SPOTIFY_CLIENT_SECRET:
-        embed = discord.Embed(
-            title="🎵 Spotify Connect",
-            description="Spotify API credentials not configured.",
-            color=discord.Color.red()
-        )
-        return await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    token = get_user_token(interaction.user.id)
-    embed = discord.Embed(
-        title="🎵 Spotify Connect",
-        color=discord.Color.gold() if token else discord.Color.dark_gray()
-    )
-
-    if token:
-        embed.description = "✅ **Connected**"
-        embed.add_field(name="Expires", value=f"<t:{int(token.get('expires_at', 0))}:R>", inline=True)
-        scope_str = token.get("scope", "N/A")
-        embed.add_field(name="Scopes", value=f"```{scope_str[:80]}```", inline=False)
-        embed.set_footer(text="Use /spotify disconnect to unlink")
-    else:
-        embed.description = "❌ **Not connected**"
-        embed.add_field(name="How to link", value="Run `/spotify connect` to link your Spotify account.", inline=False)
-        embed.set_footer(text="Requires Spotify API credentials in .env")
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
 # ──────────────────────────────────────────────
 
 @app_commands.command(name="lyrics", description="Get lyrics for the current song or a specific query")
@@ -2016,7 +1845,6 @@ if __name__ == '__main__':
         backup, backup_list, restore, backup_delete, quality,
         rec_reset, rec_stats,
         # New features
-        spotify_connect, spotify_token, spotify_disconnect, spotify_status,
     ]
 
     async def main():
@@ -2043,7 +1871,6 @@ if __name__ == '__main__':
                 print(f"[bot] Failed to start Spotify OAuth server: {e}")
 
         # Start Dashboard with the list of bots
-        await start_dashboard(all_bots)
 
         # Run all bots concurrently
         await asyncio.gather(*[b.start(token) for b, token in zip(all_bots, Config.DISCORD_TOKENS)])

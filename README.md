@@ -11,8 +11,6 @@ A simple, educational Discord music bot that plays from YouTube via **yt-dlp**. 
 - ⏭️ **Skip vote** + DJ force skip
 - 🎛️ **Volume control**
 - 📢 **Song request channel** — auto-play from text channel
-- 🖥️ **Web dashboard** — `localhost:8080` with dark theme
-- 🎧 **Spotify Connect** — link account, browse playlist
 - 🛡️ **Rate limiter** — prevents spam
 - 📝 **Audit log** — tracks command usage
 - 🔁 **Autoplay / radio mode**
@@ -20,7 +18,7 @@ A simple, educational Discord music bot that plays from YouTube via **yt-dlp**. 
 
 ## Why yt-dlp (not Lavalink)?
 
-No Java. No Lavalink server. Just Python + yt-dlp. Perfect for learning how Discord music bots work at the foundation level. If you want a more advanced version with Lavalink, check out the private fork ([RHYTHMIFY](https://github.com/justaboring/Voidfy)).
+No Java. No Lavalink server. Just Python + yt-dlp. Perfect for learning how Discord music bots work at the foundation level. If you want a more advanced version with Lavalink, check out the private fork ([RHYTHMIFY](https://github.com/justaboring/RHYTHMIFY)).
 
 ## Quick Start
 
@@ -62,11 +60,6 @@ python bot.py
 | `/remove <pos>` | Remove from queue |
 | `/move <from> <to>` | Move queue position |
 | `/clear` | Clear queue |
-| **Spotify Connect** | |
-| `/spotify_connect` | Link Spotify account |
-| `/spotify_token` | Complete OAuth |
-| `/spotify_disconnect` | Unlink |
-| `/spotify_status` | Check status |
 | **Utility** | |
 | `/controlpanel` | Toggle control panel |
 | `/search <query>` | Search & choose |
@@ -80,17 +73,11 @@ python bot.py
 ├── music_player.py             # yt-dlp audio playback engine
 ├── ytmusic_module.py           # YouTube Music integration
 ├── soundcloud_module.py        # SoundCloud integration
-├── spotify_module.py           # Spotify search
-├── spotify_auth.py             # Spotify OAuth flow (NEW)
-├── command_rate_limiter.py     # Per-user rate limiting (NEW)
-├── audit_log.py                # Command usage tracking (NEW)
-├── web_dashboard.py            # aiohttp dashboard server
+├── spotify_module.py           # Spotify URL search
+├── command_rate_limiter.py     # Per-user rate limiting
+├── audit_log.py                # Command usage tracking
 ├── ui_components.py            # Discord UI views
-├── static/                     # Dashboard frontend
-│   ├── index.html
-│   ├── style.css               # Dark theme + gold accents
-│   └── script.js               # Toast + keyboard shortcuts
-└── gamesave.sh                 # Utility backup script
+└── requirements.txt
 ```
 
 ## Requirements

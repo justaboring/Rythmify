@@ -72,6 +72,7 @@ async def handle_index(request):
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
     <style>
         * { font-family: 'Inter', sans-serif; }
         body { 
@@ -590,6 +591,7 @@ async def handle_index(request):
             }
         }
     </script>
+    <script src="/static/script.js"></script>
 </body>
 </html>
     """
@@ -661,6 +663,7 @@ async def handle_guild(request):
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
     <style>
         * { font-family: 'Inter', sans-serif; }
         body { 
@@ -1061,6 +1064,7 @@ async def handle_guild(request):
             }
         });
     </script>
+    <script src="/static/script.js"></script>
 </body>
 </html>
     """
@@ -1179,6 +1183,11 @@ async def start_dashboard(bots):
     app.router.add_post('/api/recommendations/complete', handle_recommendation_complete)
     app.router.add_get('/api/quality', handle_quality_get)
     app.router.add_post('/api/quality', handle_quality_set)
+
+    # Serve static files
+    static_dir = os.path.join(os.path.dirname(__file__), 'static')
+    app.router.add_static('/static/', path=static_dir, name='static')
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', Config.DASHBOARD_PORT)

@@ -17,6 +17,11 @@ Supports: **Arch Linux** (primary), other Linux distributions, and **Windows**.
 - 🎚️ Persistent control panel (`/controlpanel`)
 - 📢 Song request channel
 - 🔁 Autoplay (radio mode)
+- 🎧 **Spotify Connect** — Link your Spotify account (`/spotify_connect`, `/spotify_token`, `/spotify_disconnect`, `/spotify_status`)
+- ⏳ **Command Rate Limiter** — Token-bucket per-user per-command, configurable via env
+- 📝 **Audit Log** — Track command usage to `audit_log.json` (auto-rotating)
+- 🎮 **Game Save Guardian** — `gamesave.sh` snapshots runtime state into dated archives
+- 🖥️ **Upgraded Dashboard** — Dark theme with gold accents, toast notifications, keyboard shortcuts
 
 ---
 
@@ -216,8 +221,13 @@ python diagnose.py
 | `/join` | Join voice channel |
 | `/leave` | Leave voice channel (DJ only) |
 | `/setrequestchannel` | Set song request channel (DJ/Admin) |
-| `/controlpanel` | Toggle persistent music control panel (DJ/Admin) |
+| `/controlpanel` | Toggle persistent music panel (DJ/Admin) |
 | `/help` | Show all commands |
+| **New — Spotify Connect** ||
+| `/spotify_connect` | Link your Spotify account (OAuth) |
+| `/spotify_token` | Complete OAuth verification |
+| `/spotify_disconnect` | Unlink Spotify account |
+| `/spotify_status` | Check connection status |
 
 ---
 
@@ -232,6 +242,13 @@ python diagnose.py
 | `MAX_QUEUE_SIZE` | `100` | Maximum songs in queue |
 | `DEFAULT_VOLUME` | `50` | Default volume (0-100) |
 | `SSL_VERIFY` | `true` | Set to `false` if you have SSL errors |
+| `RATE_LIMIT_ENABLED` | `true` | Enable/disable command rate limiter |
+| `RATE_LIMIT_TOKENS` | `5` | Max burst of same command per window |
+| `RATE_LIMIT_REFILL_RATE` | `1` | Tokens added per refill period |
+| `RATE_LIMIT_REFILL_SECONDS` | `5` | Refill period in seconds |
+| `AUDIT_LOG_PATH` | `audit_log.json` | Path for command audit log |
+| `AUDIT_LOG_MAX_SIZE` | `10485760` | Max audit log size (bytes) before rotation |
+| `SPOTIFY_REDIRECT_URI` | `http://localhost:8889/callback` | OAuth callback URI |
 
 ---
 

@@ -50,7 +50,21 @@ intents.members = True
 all_bots = [] # Store all bot instances for coordination
 
 class MusicBot(commands.Bot):
+    """Discord bot subclass managing voice playback across one or more tokens.
+
+    Supports a primary + secondary bot setup where the primary bot handles all
+    slash commands and one or more secondary bots share the load of voice
+    connections.  State restoration across restarts is supported via the
+    ``restart_state.json`` file.
+    """
+
     def __init__(self, is_primary: bool = False):
+        """Initialise a MusicBot instance.
+
+        Args:
+            is_primary: Whether this is the primary bot (handles slash commands
+                and presence).  Secondary bots are voice-only workers.
+        """
         super().__init__(command_prefix='!', intents=intents, help_command=None)
         self.spotify = SpotifyClient(Config.SPOTIFY_CLIENT_ID, Config.SPOTIFY_CLIENT_SECRET)
         self.is_primary = is_primary # Flag to identify the main bot
@@ -61,6 +75,12 @@ class MusicBot(commands.Bot):
         await restore_guild_session(self, guild_id, info)
 
     async def setup_hook(self):
+        """Sync slash commands on startup.
+
+        The primary bot syncs all commands globally and clears any stale
+        guild-level commands.  Secondary bots clear all commands to avoid
+        duplicate entries appearing in the Discord client.
+        """
         if self.is_primary:
             try:
                 # Clear guild-level commands (often causes duplicates in menu)
@@ -88,6 +108,7 @@ class MusicBot(commands.Bot):
                 print(f"Error clearing secondary bot commands: {e}")
 
     async def on_ready(self):
+        """Handle bot-ready event: auto-join owner's VC, restore sessions, set presence."""
         print(f'Bot online as {self.user}!')
 
         # Auto-join owner's voice channel (ONLY for the primary bot)
@@ -326,6 +347,10 @@ class MusicCog:
         return find_voice_client(guild_id)
 
     async def pause_callback(self, interaction: discord.Interaction):
+        """Toggle pause/resume for the current song via UI button.
+
+        If paused, resumes; if playing, pauses.
+        """
         voice_client = find_voice_client(interaction.guild_id)
         guild_state  = get_guild_state(interaction.guild_id)
 
@@ -344,6 +369,11 @@ class MusicCog:
         await refresh_panel(interaction.guild, guild_state, interaction.client)
 
     async def skip_callback(self, interaction: discord.Interaction):
+        """Skip the current song via UI button.
+
+        DJs skip instantly; non-DJs trigger a vote that passes at the configured
+        threshold percentage of voice-channel members.
+        """
         voice_client = find_voice_client(interaction.guild_id)
         if not voice_client:
             return await interaction.response.send_message("❌ Nothing is playing!", ephemeral=True)
@@ -370,6 +400,7 @@ class MusicCog:
         await refresh_panel(interaction.guild, guild_state, interaction.client)
 
     async def stop_callback(self, interaction: discord.Interaction):
+        """Stop playback and clear the queue (DJ only, triggered from UI)."""
         if not is_dj(interaction.user):
             return await interaction.response.send_message("❌ DJ only command!", ephemeral=True)
 
@@ -570,6 +601,13 @@ async def join(interaction: discord.Interaction):
 @app_commands.command(name="play", description="Play music (YouTube, Spotify URL, or Spotify Playlist Name)")
 @app_commands.describe(query="Song name, URL, or 'playlist: judul playlist'")
 async def play(interaction: discord.Interaction, query: str):
+    """Play a song from YouTube, a Spotify link, or a saved playlist name.
+
+    Accepts direct URLs (YouTube, Spotify tracks/playlists/albums),
+    free-text search queries, and the ``playlist:<name>`` prefix for
+    saved Spotify playlists.  Auto-joins the user's voice channel if not
+    already connected.
+    """
     # Check: Owner OR in Voice Channel
     if not is_authorized(interaction.user):
         return await interaction.response.send_message("❌ You must be in a voice channel (or be owner) to use this command!", ephemeral=True)
@@ -633,6 +671,7 @@ async def play(interaction: discord.Interaction, query: str):
 @app_commands.command(name="search", description="Search YouTube and choose from results")
 @app_commands.describe(query="Song name to search")
 async def search(interaction: discord.Interaction, query: str):
+    """Search YouTube, present up to 5 results, and let the user pick one."""
     # Check: Owner OR in Voice Channel
     if not is_authorized(interaction.user):
         return await interaction.response.send_message("❌ You must be in a voice channel (or be owner) to use this command!", ephemeral=True)
@@ -697,6 +736,7 @@ async def soundcloud_search(interaction: discord.Interaction, query: str):
 
 @app_commands.command(name="skip", description="Vote to skip current song")
 async def skip(interaction: discord.Interaction):
+    """Vote to skip the current song. DJs skip instantly; everyone else votes."""
     # Check: Owner OR in Voice Channel
     if not is_authorized(interaction.user):
         return await interaction.response.send_message("❌ You must be in a voice channel (or be owner) to use this command!", ephemeral=True)
@@ -728,6 +768,7 @@ async def skip(interaction: discord.Interaction):
 
 @app_commands.command(name="forceskip", description="Skip immediately (DJ only)")
 async def forceskip(interaction: discord.Interaction):
+    """Skip the current song instantly. DJ-only command."""
     if not is_dj(interaction.user):
         return await interaction.response.send_message("❌ DJ only command!", ephemeral=True)
 
@@ -787,6 +828,7 @@ async def stop(interaction: discord.Interaction):
 
 @app_commands.command(name="queue", description="Show the music queue (only you can see this)")
 async def show_queue(interaction: discord.Interaction):
+    """Display the current song queue in an ephemeral embed with pagination."""
     # Check: Owner OR in Voice Channel
     if not is_authorized(interaction.user):
         return await interaction.response.send_message("❌ You must be in a voice channel (or be owner) to use this command!", ephemeral=True)
@@ -802,6 +844,7 @@ async def show_queue(interaction: discord.Interaction):
 
 @app_commands.command(name="nowplaying", description="Show current song info")
 async def nowplaying(interaction: discord.Interaction):
+    """Display the currently playing song with a persistent control view."""
     # Check: Owner OR in Voice Channel
     if not is_authorized(interaction.user):
         return await interaction.response.send_message("❌ You must be in a voice channel (or be owner) to use this command!", ephemeral=True)
@@ -818,6 +861,10 @@ async def nowplaying(interaction: discord.Interaction):
 @app_commands.command(name="volume", description="Set volume (0-100)")
 @app_commands.describe(level="Volume level (0-100)")
 async def volume(interaction: discord.Interaction, level: int):
+    """Set the playback volume (0-100) for the current guild.
+
+    Changes take effect immediately on the current audio source.
+    """
     # Check: Owner OR in Voice Channel
     if not is_authorized(interaction.user):
         return await interaction.response.send_message("❌ You must be in a voice channel (or be owner) to use this command!", ephemeral=True)
@@ -1160,6 +1207,7 @@ async def rec_stats(interaction: discord.Interaction):
 
 @app_commands.command(name="help", description="Show available commands")
 async def help_command(interaction: discord.Interaction):
+    """Display a categorized list of all available slash commands."""
     embed = discord.Embed(
         title="🎵 Music Bot Commands",
         description="Slash commands - use `/` to see all commands",
@@ -1382,6 +1430,11 @@ async def shutdown_bot(interaction: discord.Interaction):
 @app_commands.command(name="ytmusic", description="Play from YouTube Music (more accurate than /play)")
 @app_commands.describe(query="Song name or artist")
 async def ytmusic_play(interaction: discord.Interaction, query: str):
+    """Search YouTube Music and play the first result.
+
+    Uses ytmusicapi for more accurate song matching compared to the generic
+    ``/play`` command which relies on yt-dlp search.
+    """
     # Check: Owner OR in Voice Channel
     if not is_authorized(interaction.user):
         return await interaction.response.send_message("❌ You must be in a voice channel (or be owner) to use this command!", ephemeral=True)
@@ -1626,6 +1679,12 @@ async def setrequestchannel(interaction: discord.Interaction, channel: discord.T
     app_commands.Choice(name="all", value="all"),
 ])
 async def loop(interaction: discord.Interaction, mode: str):
+    """Set the loop mode for playback.
+
+    - ``off``: No looping, plays through the queue once.
+    - ``one``: Repeats the current song indefinitely.
+    - ``all``: Repeats the entire queue when it reaches the end.
+    """
     guild_state = get_guild_state(interaction.guild_id)
     guild_state.loop_mode = mode
 

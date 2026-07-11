@@ -15,6 +15,16 @@ import concurrent.futures
 process_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)  # Optimized for 4 concurrent downloads
 
 def _extract_info_sync(url, download=False, quality_preset=None):
+    """Run yt-dlp extraction in a thread pool executor.
+
+    Args:
+        url: The URL or search query to extract.
+        download: Whether to download the file (vs. just extracting info).
+        quality_preset: Optional quality preset key from Config.VOICE_QUALITY_PRESETS.
+
+    Returns:
+        A dict with extracted media information from yt-dlp.
+    """
     import yt_dlp
     from config import Config
 
@@ -152,7 +162,21 @@ class CrossfadeSource(discord.AudioSource):
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
+    """Audio source that wraps yt-dlp extracted media as a Discord audio stream.
+
+    Fetches audio from YouTube or other supported sites via yt-dlp, optionally
+    applies quality presets and audio filters through FFmpeg, and provides the
+    result as a PCM-volume-transformable audio source for Discord voice.
+    """
+
     def __init__(self, source, *, data, volume=0.5):
+        """Initialise the audio source.
+
+        Args:
+            source: An FFmpegPCMAudio instance (the raw audio stream).
+            data: Metadata dict from yt-dlp extraction (title, url, duration, …).
+            volume: Initial volume level (0.0 – 1.0).
+        """
         super().__init__(source, volume)
         self.data = data
         self.title = data.get('title', 'Unknown Title')
@@ -165,6 +189,21 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=True, requester=None, quality_preset=None):
+        """Create a YTDLSource from a URL or search query.
+
+        Runs yt-dlp extraction in a thread-pool executor, then builds an FFmpeg
+        audio stream with the appropriate quality preset and audio filter.
+
+        Args:
+            url: A YouTube / supported-site URL, or a ``ytsearch:…`` query.
+            loop: The asyncio event loop (defaults to the running loop).
+            stream: Whether to stream (True) or download the file (False).
+            requester: The Discord member who requested the song.
+            quality_preset: Quality preset name, or None to use guild default.
+
+        Returns:
+            A fully-initialised YTDLSource ready for playback.
+        """
         loop = loop or asyncio.get_event_loop()
 
         # Get quality from guild if not specified
@@ -219,6 +258,19 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
     @classmethod
     def _pick_best(cls, entries, query):
+        """Score and pick the best match from a list of yt-dlp search entries.
+
+        Applies a heuristic that favours official audio sources (Topic channels),
+        penalises music videos and very short/long tracks, and rewards title
+        keyword overlap with the original query.
+
+        Args:
+            entries: List of yt-dlp result dicts.
+            query: The original search string (used for keyword matching).
+
+        Returns:
+            The highest-scoring entry dict, or the first entry as fallback.
+        """
         query_words = set(query.lower().split())
         best = None
         best_score = -1
@@ -257,6 +309,19 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
     @classmethod
     async def search(cls, query, *, loop=None, requester=None):
+        """Search YouTube and return the best-matching YTDLSource.
+
+        Performs a ``ytsearch5:`` query via yt-dlp, scores the results with
+        ``_pick_best``, then loads the winner as a playable source.
+
+        Args:
+            query: Free-text search string.
+            loop: The asyncio event loop.
+            requester: The Discord member who requested the song.
+
+        Returns:
+            A YTDLSource for the top-ranked result.
+        """
         loop = loop or asyncio.get_event_loop()
 
         raw = await loop.run_in_executor(
@@ -275,6 +340,19 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
     @classmethod
     async def refresh(cls, song, *, loop=None, quality_preset=None):
+        """Re-extract the stream URL for an existing song (URLs expire).
+
+        Calls yt-dlp again on the same webpage URL to get a fresh streaming
+        URL, then rebuilds the FFmpegPCMAudio with current filters/quality.
+
+        Args:
+            song: The YTDLSource instance to refresh.
+            loop: The asyncio event loop.
+            quality_preset: Optional override quality preset.
+
+        Returns:
+            A new YTDLSource with a fresh stream URL.
+        """
         loop        = loop or asyncio.get_event_loop()
         webpage_url = song.webpage_url
         if not webpage_url:
@@ -322,10 +400,25 @@ class YTDLSource(discord.PCMVolumeTransformer):
         return refreshed
 
     def format_duration(self):
+        """Return the song duration as a human-readable MM:SS / HH:MM:SS string.
+
+        Delegates to ``utils.format_duration``.
+        """
         return format_duration(self.duration)
 
 class GuildMusicState:
+    """Per-guild playback state, including queue, loop mode, and filter settings.
+
+    One instance exists per guild that has ever played music.  Access via
+    ``get_guild_state(guild_id)``.
+    """
+
     def __init__(self, guild_id):
+        """Initialise an empty music state for a guild.
+
+        Args:
+            guild_id: The Discord guild (server) ID.
+        """
         self.guild_id            = guild_id
         self.queue               = []
         self.current_song        = None
@@ -404,19 +497,43 @@ class GuildMusicState:
             lines.append(f"*...and {len(self.queue) - start - count} more*")
         return "\n".join(lines)
 
-guild_states = {}
 
-def get_guild_state(guild_id):
+guild_states: dict[int, GuildMusicState] = {}
+
+
+def get_guild_state(guild_id: int) -> GuildMusicState:
+    """Return the GuildMusicState for a guild, creating it on first access.
+
+    The returned state object is shared — all callers mutate the same instance.
+    """
     if guild_id not in guild_states:
         guild_states[guild_id] = GuildMusicState(guild_id)
     return guild_states[guild_id]
 
-def cleanup_guild_state(guild_id):
+
+def cleanup_guild_state(guild_id: int) -> None:
+    """Remove a guild's playback state and drop its prefetch cache entry."""
     if guild_id in guild_states:
         del guild_states[guild_id]
     _prefetch_cache.pop(guild_id, None)
 
+
 async def fetch_autoplay_suggestion(song, loop, history, song_history=None):
+    """Fetch an autoplay suggestion from YouTube Music based on the current song.
+
+    Uses ytmusicapi to get a watch playlist (radio) for the current song's video
+    ID, then scores candidates by artist overlap with recent history for
+    coherent transitions.
+
+    Args:
+        song: The currently playing YTDLSource.
+        loop: The asyncio event loop.
+        history: List of recently-played video IDs (to avoid repeats).
+        song_history: Optional list of recent YTDLSource instances.
+
+    Returns:
+        A YTDLSource for the suggested next track, or None if nothing suitable.
+    """
     def _fetch():
         import ytmusicapi
         ytm = ytmusicapi.YTMusic()
@@ -590,6 +707,18 @@ async def _crossfade_timer(voice_client, guild_state, bot_loop):
 
 
 async def play_next_song(voice_client, guild_state, bot_loop):
+    """Play the next song in the queue, respecting loop, autoplay, and crossfade.
+
+    Core playback loop: determines the next source based on the current
+    ``loop_mode`` and ``autoplay`` state, refreshes expired stream URLs,
+    handles prefetch-cache hits, schedules crossfade timers, and dispatches
+    ``track_update`` events for the UI panel.
+
+    Args:
+        voice_client: The guild's ``discord.VoiceClient``.
+        guild_state: The guild's ``GuildMusicState`` instance.
+        bot_loop: The asyncio event loop to schedule follow-up work on.
+    """
     from stats_store import record_play
 
     # Cancel any pending crossfade task

@@ -1,0 +1,12 @@
+.venv
+.env
+__pycache__
+*.json
+*.sav
+.git
+.gitignore
+README.md
+run_bot.sh
+run_bot.bat
+install_windows.bat
+install_arch.sh

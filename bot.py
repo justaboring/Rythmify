@@ -22,13 +22,12 @@ from ui_components import (
 )
 from panel_store import get_panel, set_panel, clear_panel
 from request_channel_store import get_request_channel, set_request_channel, clear_request_channel
-from utils import parse_spotify_url, is_url
+from utils import is_url
 from ytmusic_module import (
     search_songs, search_videos, get_artist_radio,
     get_mood_playlists, get_mood_tracks,
     get_playlist_tracks, track_to_source_data
 )
-from spotify_module import SpotifyClient
 from playlist_store import (
     create_playlist, save_queue_as_playlist, get_playlist,
     get_user_playlists, delete_playlist, add_to_playlist, remove_from_playlist
@@ -66,7 +65,6 @@ class MusicBot(commands.Bot):
                 and presence).  Secondary bots are voice-only workers.
         """
         super().__init__(command_prefix='!', intents=intents, help_command=None)
-        self.spotify = SpotifyClient(Config.SPOTIFY_CLIENT_ID, Config.SPOTIFY_CLIENT_SECRET)
         self.is_primary = is_primary # Flag to identify the main bot
 
     async def _trigger_restore(self, guild_id: int, info: dict):
@@ -156,37 +154,17 @@ class MusicBot(commands.Bot):
                 await self.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="/help"))
 
 soundcloud_client = SoundCloudClient()
-global_spotify = SpotifyClient(Config.SPOTIFY_CLIENT_ID, Config.SPOTIFY_CLIENT_SECRET)
+
 
 async def process_spotify_list(interaction, voice_client, guild_state, queries):
-    """Process Spotify tracks with parallel fetching (up to 4 concurrent)."""
-    await interaction.followup.send(f"⏳ Processing {len(queries)} tracks from Spotify...", ephemeral=True)
+    """Stub retained for backwards compatibility; Spotify support removed."""
+    await interaction.followup.send("❌ Spotify integration has been removed from this project.", ephemeral=True)
 
-    sem = asyncio.Semaphore(4)
-    added = 0
 
-    async def _resolve(sq):
-        nonlocal added
-        if len(guild_state.queue) >= Config.MAX_QUEUE_SIZE:
-            return
-        async with sem:
-            try:
-                source = await YTDLSource.from_url(f"ytsearch:{sq}", loop=interaction.client.loop, stream=True, requester=interaction.user)
-                if guild_state.add_to_queue(source):
-                    added += 1
-            except Exception:
-                pass
+def handle_spotify_urls_sync(query: str) -> list:
+    """Stub retained for backwards compatibility; Spotify support removed."""
+    return []
 
-    await asyncio.gather(*[_resolve(sq) for sq in queries[:50]])
-
-    if added > 0:
-        already_playing = voice_client.is_playing() or voice_client.is_paused()
-        await interaction.followup.send(f"🎵 Added **{added}** tracks to queue!", ephemeral=True)
-        if not already_playing:
-            await play_next_song(voice_client, guild_state, interaction.client.loop)
-        await refresh_panel(interaction.guild, guild_state, interaction.client)
-    else:
-        await interaction.followup.send("❌ Could not load any tracks from that playlist.", ephemeral=True)
 
 def find_voice_client(guild_id: int):
     """Find the active voice_client among all bots connected to this guild."""
@@ -196,19 +174,6 @@ def find_voice_client(guild_id: int):
             return guild.voice_client
     return None
 
-def handle_spotify_urls_sync(query: str) -> list:
-    match = parse_spotify_url(query)
-    if not match:
-        return []
-    url_type, spotify_id = match
-    if url_type == 'track':
-        q = global_spotify.get_track_query(spotify_id)
-        return [q] if q else []
-    elif url_type == 'playlist':
-        return global_spotify.get_playlist_queries(spotify_id)
-    elif url_type == 'album':
-        return global_spotify.get_album_queries(spotify_id)
-    return []
 
 # ────────────────────────────────────────────── 
 # PANEL HELPERS 
@@ -551,7 +516,9 @@ async def periodic_audit_flush(interval: int = 30):
             print(f"[audit_log] Flush error: {e}")
 
 
-# ── Spotify Connect Imports ──────────────────────────────────────────────
+# ──────────────────────────────────────────────
+# SLASH COMMANDS
+# ──────────────────────────────────────────────
 
 @app_commands.command(name="controlpanel", description="Toggle persistent music control panel in this channel (DJ/Admin only)")
 async def controlpanel(interaction: discord.Interaction):
@@ -598,19 +565,22 @@ async def join(interaction: discord.Interaction):
     voice_client = await ensure_voice(interaction)
     if voice_client:
         await interaction.response.send_message(f"✅ Joined **{voice_client.channel.name}**", ephemeral=True)
-@app_commands.command(name="play", description="Play music (YouTube, Spotify URL, or Spotify Playlist Name)")
-@app_commands.describe(query="Song name, URL, or 'playlist: judul playlist'")
+@app_commands.command(name="play", description="Play music from YouTube, SoundCloud, or a saved playlist")
+@app_commands.describe(query="Song name, URL, or saved playlist name")
 async def play(interaction: discord.Interaction, query: str):
-    """Play a song from YouTube, a Spotify link, or a saved playlist name.
+    """Play a song from YouTube, SoundCloud, a URL, or a saved playlist name.
 
-    Accepts direct URLs (YouTube, Spotify tracks/playlists/albums),
-    free-text search queries, and the ``playlist:<name>`` prefix for
-    saved Spotify playlists.  Auto-joins the user's voice channel if not
-    already connected.
+    Accepts direct URLs (YouTube), free-text search queries, and saved
+    playlist names.  Auto-joins the user's voice channel if not already
+    connected.
     """
     # Check: Owner OR in Voice Channel
     if not is_authorized(interaction.user):
         return await interaction.response.send_message("❌ You must be in a voice channel (or be owner) to use this command!", ephemeral=True)
+
+    query = query.strip()
+    if not query:
+        return await interaction.response.send_message("❌ Please provide a song name, URL, or playlist name.", ephemeral=True)
 
     await interaction.response.defer(ephemeral=True)
 
@@ -621,35 +591,20 @@ async def play(interaction: discord.Interaction, query: str):
     guild_state = get_guild_state(interaction.guild_id)
 
     try:
-        # Fitur baru: Mencari playlist global jika diawali dengan 'playlist:'
-        if query.lower().startswith("playlist:"):
-            search_query = query[9:].strip()
-            await interaction.followup.send(f"🔍 Searching global Spotify playlist: **{search_query}**...", ephemeral=True)
-            spotify_queries = await interaction.client.loop.run_in_executor(None, global_spotify.search_playlist_queries, search_query)
-            if spotify_queries:
-                # Gunakan logika penambahan queue yang sudah ada untuk playlist
-                await process_spotify_list(interaction, voice_client, guild_state, spotify_queries)
+        # Saved playlist lookup
+        if not is_url(query):
+            saved = get_playlist(interaction.guild_id or 0, interaction.user.id, query)
+            if saved and saved.get("tracks"):
+                tracks = saved["tracks"][:Config.MAX_QUEUE_SIZE]
+                added = await _parallel_load_tracks(tracks, interaction, guild_state, voice_client)
+                if added:
+                    await interaction.followup.send(f"🎵 Added **{added}** tracks from playlist **{query}**!", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ Could not load tracks from that playlist.", ephemeral=True)
                 return
-            else:
-                return await interaction.followup.send("❌ No Spotify playlist found with that name.", ephemeral=True)
-
-        is_spotify = "spotify.com" in query
-        if is_spotify:
-            spotify_queries = await interaction.client.loop.run_in_executor(None, handle_spotify_urls_sync, query)
-            if not spotify_queries:
-                return await interaction.followup.send("❌ Failed to resolve Spotify link or it's empty.", ephemeral=True)
-
-            # Defer update for long playlists
-            await process_spotify_list(interaction, voice_client, guild_state, spotify_queries)
-            return
 
         if not query.startswith('http'):
-            # Try to resolve via Spotify search first
-            spotify_search = await interaction.client.loop.run_in_executor(None, global_spotify.search_track, query)
-            if spotify_search:
-                query = f"ytsearch:{spotify_search}"
-            else:
-                query = f"ytsearch:{query}"
+            query = f"ytsearch:{query}"
 
         source = await YTDLSource.from_url(query, loop=interaction.client.loop, stream=True, requester=interaction.user)
 
@@ -701,7 +656,7 @@ async def search(interaction: discord.Interaction, query: str):
         if not sources:
             return await interaction.followup.send("❌ No results found!", ephemeral=True)
 
-        view = SongSelectView(MusicCog(interaction.client), sources, is_spotify=False)
+        view = SongSelectView(MusicCog(interaction.client), sources, is_soundcloud=False)
         await interaction.followup.send("🎵 Select a song:", view=view, ephemeral=True)
 
     except Exception as e:
@@ -731,7 +686,7 @@ async def soundcloud_search(interaction: discord.Interaction, query: str):
     tracks = soundcloud_client.search_track(query, limit=5)
     if not tracks:
         return await interaction.followup.send("❌ No SoundCloud results found!", ephemeral=True)
-    view = SongSelectView(MusicCog(interaction.client), tracks, is_spotify=True)
+    view = SongSelectView(MusicCog(interaction.client), tracks, is_soundcloud=True)
     await interaction.followup.send("🎵 Select a SoundCloud track:", view=view, ephemeral=True)
 
 @app_commands.command(name="skip", description="Vote to skip current song")
@@ -1271,10 +1226,6 @@ async def help_command(interaction: discord.Interaction):
         ("/lyrics",               "Get lyrics for current song"),
     ]
     embed.add_field(name="🛠️ Utilities", value="\n".join([f"**{cmd}**: {desc}" for cmd, desc in utils_cmds]), inline=False)
-
-    # Spotify Connect
-    spotify_cmds = [
-    ]
 # ──────────────────────────────────────────────
 
 @app_commands.command(name="lyrics", description="Get lyrics for the current song or a specific query")
@@ -1770,49 +1721,8 @@ async def handle_message_request(current_bot, message):
     loading_msg = await message.channel.send(f"🔍 Searching for **{query[:50]}**...")
 
     try:
-        is_spotify = "spotify.com" in query
-        if is_spotify:
-            spotify_queries = await current_bot.loop.run_in_executor(None, handle_spotify_urls_sync, query)
-            if not spotify_queries:
-                await loading_msg.edit(content="❌ Failed to resolve Spotify link or it's empty.")
-                await asyncio.sleep(3)
-                await loading_msg.delete()
-                return
-
-            added = 0
-            for sq in spotify_queries[:50]:
-                if len(guild_state.queue) >= Config.MAX_QUEUE_SIZE:
-                    break
-                try:
-                    source = await YTDLSource.from_url(f"ytsearch:{sq}", loop=current_bot.loop, stream=True, requester=message.author)
-                    if guild_state.add_to_queue(source):
-                        added += 1
-                except Exception:
-                    continue
-
-            if added == 0:
-                await loading_msg.edit(content="❌ Failed to load Spotify tracks!")
-                await asyncio.sleep(3)
-                await loading_msg.delete()
-                return
-
-            already_playing = voice_client.is_playing() or voice_client.is_paused()
-            await loading_msg.edit(content=f"🎵 Added **{added}** tracks from Spotify by {message.author.mention}")
-            await asyncio.sleep(3)
-            await loading_msg.delete()
-
-            if not already_playing:
-                await play_next_song(voice_client, guild_state, current_bot.loop)
-
-            await refresh_panel(message.guild, guild_state, current_bot)
-            return
-
         if not query.startswith('http'):
-            spotify_search = await current_bot.loop.run_in_executor(None, global_spotify.search_track, query)
-            if spotify_search:
-                search_query = f"ytsearch:{spotify_search}"
-            else:
-                search_query = f"ytsearch:{query}"
+            search_query = f"ytsearch:{query}"
         else:
             search_query = query
 
@@ -1921,15 +1831,6 @@ if __name__ == '__main__':
 
         # Start background tasks
         asyncio.create_task(periodic_audit_flush(interval=30))
-
-        # Start Spotify OAuth callback server if credentials exist
-        if Config.SPOTIFY_CLIENT_ID and Config.SPOTIFY_CLIENT_SECRET and _SPOTIFY_AUTH_AVAILABLE:
-            try:
-                await start_callback_server()
-            except Exception as e:
-                print(f"[bot] Failed to start Spotify OAuth server: {e}")
-
-        # Start Dashboard with the list of bots
 
         # Run all bots concurrently
         await asyncio.gather(*[b.start(token) for b, token in zip(all_bots, Config.DISCORD_TOKENS)])

@@ -34,6 +34,7 @@ def test_import_config():
     import config
     importlib.reload(config)
     assert hasattr(config, "Config")
+    assert not hasattr(config.Config, "SPOTIFY_CLIENT_ID")
 
 
 def test_import_ytmusic_module():
@@ -52,14 +53,7 @@ def test_import_utils():
     """Utils module has no external deps beyond stdlib."""
     import utils
     assert hasattr(utils, "format_duration")
-    assert hasattr(utils, "parse_spotify_url")
     assert hasattr(utils, "is_url")
-
-
-def test_import_spotify_module():
-    """Spotify module depends on spotipy."""
-    import spotify_module
-    assert hasattr(spotify_module, "SpotifyClient")
 
 
 def test_import_ui_components():

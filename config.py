@@ -69,8 +69,6 @@ def _find_ffmpeg() -> str:
 
 class Config:
     DISCORD_TOKENS = [t.strip() for t in os.getenv('DISCORD_TOKEN', '').split(',') if t.strip()] # Supports multiple tokens
-    SPOTIFY_CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
-    SPOTIFY_CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
     # ── Platform detection ──────────────────────────────────────────────────
     _system    = platform.system()      # 'Linux', 'Windows', 'Darwin'
     is_windows = _system == "Windows"
@@ -82,7 +80,10 @@ class Config:
     FFMPEG_PATH: str = _find_ffmpeg()
 
     SKIP_VOTE_THRESHOLD = int(os.getenv('SKIP_VOTE_THRESHOLD', '50'))
-    OWNER_ID            = int(os.getenv('OWNER_ID', 'your_id'))
+    try:
+        OWNER_ID = int(os.getenv('OWNER_ID', '0'))
+    except ValueError:
+        OWNER_ID = 0
     DJ_ROLE_NAME        = os.getenv('DJ_ROLE_NAME', 'DJ')
     MAX_QUEUE_SIZE      = int(os.getenv('MAX_QUEUE_SIZE', '100'))
     DEFAULT_VOLUME      = int(os.getenv('DEFAULT_VOLUME', '50'))

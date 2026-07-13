@@ -14,6 +14,7 @@ class Colors:
     ACCENT_GREEN = 0x57F287
     ACCENT_RED   = 0xED4245
     TEAL         = 0x1ABC9C
+    DARK_GRAY    = 0x4F545C  # used for disabled/OFF toggle state
 
 
 # ──────────────────────────────────────────────
@@ -49,10 +50,10 @@ def create_dashboard_embed(guild_state, voice_client=None, guild=None) -> discor
         lines = [now]
         for i, s in enumerate(guild_state.queue[:10], start=1):
             d = s.format_duration() if s.duration else "?:??"
-            t = s.title[:50] + "…" if len(s.title) > 50 else s.title
+            t = s.title[:50] + "..." if len(s.title) > 50 else s.title
             lines.append(f"`{i}.` {t} — `{d}`")
         if len(guild_state.queue) > 10:
-            lines.append(f"*…and {len(guild_state.queue) - 10} more*")
+            lines.append(f"*...and {len(guild_state.queue) - 10} more*")
         queue_text = "\n".join(lines)
     else:
         queue_text = now + "\n*Queue is empty*"
@@ -100,16 +101,21 @@ class ControlPanelView(discord.ui.View):
 
     def _update_button_states(self):
         for child in self.children:
+            if not isinstance(child, discord.ui.Button):
+                continue
             if getattr(child, 'custom_id', None) == "cp_pause":
                 child.label = "Resume" if self.guild_state.is_paused else "Pause"
                 child.emoji = discord.PartialEmoji(name="▶️") if self.guild_state.is_paused else discord.PartialEmoji(name="⏸️")
                 child.style = discord.ButtonStyle.secondary if self.guild_state.is_paused else discord.ButtonStyle.primary
             elif getattr(child, 'custom_id', None) == "cp_autoplay":
-                child.style = discord.ButtonStyle.success if getattr(self.guild_state, 'autoplay', False) else discord.ButtonStyle.secondary
+                autoplay = getattr(self.guild_state, 'autoplay', False)
+                child.style = discord.ButtonStyle.success if autoplay else discord.ButtonStyle.secondary
+                child.emoji = discord.PartialEmoji(name="🔁") if autoplay else discord.PartialEmoji(name="➡️")
+                child.label = "Auto ON" if autoplay else "Auto OFF"
             elif getattr(child, 'custom_id', None) == "cp_loop":
                 loop_mode = getattr(self.guild_state, 'loop_mode', 'off')
                 icons = {"off": "➡️", "one": "🔂", "all": "🔁"}
-                labels = {"off": "Loop", "one": "Loop: One", "all": "Loop: All"}
+                labels = {"off": "Loop: Off", "one": "Loop: One", "all": "Loop: All"}
                 child.emoji = discord.PartialEmoji(name=icons[loop_mode])
                 child.label = labels[loop_mode]
                 child.style = discord.ButtonStyle.success if loop_mode != 'off' else discord.ButtonStyle.secondary
@@ -233,7 +239,7 @@ class ControlPanelView(discord.ui.View):
         await interaction.response.send_message("🔀 Queue shuffled!", ephemeral=True)
         await self._do_refresh(interaction)
 
-    @discord.ui.button(emoji="🔁", label="AutoPlay", style=discord.ButtonStyle.secondary, custom_id="cp_autoplay", row=1)
+    @discord.ui.button(emoji="➡️", label="Auto OFF", style=discord.ButtonStyle.secondary, custom_id="cp_autoplay", row=1)
     async def autoplay_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.guild_state.autoplay = not self.guild_state.autoplay
         state_str = "ON" if self.guild_state.autoplay else "OFF"
@@ -263,7 +269,7 @@ class ControlPanelView(discord.ui.View):
         await interaction.response.send_message("⏹️ Stopped and cleared queue!", ephemeral=True)
         await self._do_refresh(interaction)
 
-    @discord.ui.button(emoji="🔂", label="Loop", style=discord.ButtonStyle.secondary, custom_id="cp_loop", row=1)
+    @discord.ui.button(emoji="➡️", label="Loop: Off", style=discord.ButtonStyle.secondary, custom_id="cp_loop", row=1)
     async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_state = self.guild_state
         modes = ['off', 'one', 'all']
@@ -271,18 +277,14 @@ class ControlPanelView(discord.ui.View):
         next_mode = modes[(modes.index(current) + 1) % len(modes)]
         guild_state.loop_mode = next_mode
         icons = {"off": "➡️", "one": "🔂", "all": "🔁"}
-        labels = {"off": "Loop Off", "one": "Loop One", "all": "Loop All"}
+        labels = {"off": "Loop: Off", "one": "Loop: One", "all": "Loop: All"}
         await interaction.response.send_message(f"{icons[next_mode]} **{labels[next_mode]}**", ephemeral=True)
         await self._do_refresh(interaction)
-
-    @discord.ui.button(emoji="🌐", label="Web Dashboard", style=discord.ButtonStyle.secondary, custom_id="cp_dash", row=2)
-    async def dashboard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.music_cog.dashboard_callback(interaction)
 
     def update_pause_button(self, is_paused: bool):
         """Update pause button label based on current state (called externally if needed)."""
         for child in self.children:
-            if getattr(child, 'custom_id', None) == "cp_pause":
+            if isinstance(child, discord.ui.Button) and getattr(child, 'custom_id', None) == "cp_pause":
                 child.label = "Resume" if is_paused else "Pause"
                 child.emoji = discord.PartialEmoji(name="▶️") if is_paused else discord.PartialEmoji(name="⏸️")
                 child.style = discord.ButtonStyle.secondary if is_paused else discord.ButtonStyle.primary
@@ -297,7 +299,7 @@ def create_control_panel_embed(guild_state) -> discord.Embed:
     if guild_state.current_song is None:
         embed = discord.Embed(
             title="Music Controller",
-            description="Waiting for music…\nSend the name or link of a music",
+            description="Waiting for music...\nSend the name or link of a music",
             color=Colors.ACCENT_BLUE,
         )
         embed.set_image(url=BANNER_URL)
@@ -306,14 +308,14 @@ def create_control_panel_embed(guild_state) -> discord.Embed:
 
     song    = guild_state.current_song
     status  = "⏸ Paused" if guild_state.is_paused else "Now playing"
-    title   = song.title[:80] + "…" if len(song.title) > 80 else song.title
+    title   = song.title[:80] + "..." if len(song.title) > 80 else song.title
     dur     = song.format_duration() if song.duration else "?:??"
     vol_pct = int(guild_state.volume * 100)
 
     next_line = ""
     if guild_state.queue:
         nxt     = guild_state.queue[0]
-        nxt_t   = nxt.title[:50] + "…" if len(nxt.title) > 50 else nxt.title
+        nxt_t   = nxt.title[:50] + "..." if len(nxt.title) > 50 else nxt.title
         nxt_dur = nxt.format_duration() if nxt.duration else "?:??"
         next_line = f"**Next song:**\n{nxt_t} — `{nxt_dur}`\n\n"
 
@@ -378,12 +380,12 @@ def create_queue_embed(guild_state, page=0, per_page=10):
     start = page * per_page
     for i, s in enumerate(guild_state.queue[start:start + per_page], start=start + 1):
         dur = s.format_duration() if s.duration else "?:??"
-        t   = s.title[:55] + "…" if len(s.title) > 55 else s.title
+        t   = s.title[:55] + "..." if len(s.title) > 55 else s.title
         lines.append(f"`{i}.` {t} — `{dur}`")
 
     total = len(guild_state.queue)
     if total > start + per_page:
-        lines.append(f"*…and {total - start - per_page} more*")
+        lines.append(f"*...and {total - start - per_page} more*")
 
     embed.description = "\n".join(lines)
     return embed
@@ -391,7 +393,7 @@ def create_queue_embed(guild_state, page=0, per_page=10):
 
 def create_added_embed(song, position=None):
     dur   = song.format_duration() if song.duration else "?:??"
-    title = song.title[:80] + "…" if len(song.title) > 80 else song.title
+    title = song.title[:80] + "..." if len(song.title) > 80 else song.title
     pos   = f" at #{position}" if position else ""
     embed = discord.Embed(
         description=f"✅  Added **{title}** — `{dur}`  to the queue{pos}.",
@@ -411,7 +413,7 @@ def create_success_embed(title, message):
 
 
 def create_info_embed(title, message):
-    return discord.Embed(title=f"ℹ️ {title}", description=message, color=Colors.ACCENT_BLUE)
+    return discord.Embed(title=f"i️ {title}", description=message, color=Colors.ACCENT_BLUE)
 
 
 # ──────────────────────────────────────────────
@@ -466,29 +468,29 @@ class SkipVoteView(discord.ui.View):
 
 
 class SongSelectView(discord.ui.View):
-    def __init__(self, music_cog, songs, is_spotify=False):
+    def __init__(self, music_cog, songs, is_soundcloud=False):
         super().__init__(timeout=60)
-        self.music_cog  = music_cog
-        self.songs      = songs
-        self.is_spotify = is_spotify
+        self.music_cog    = music_cog
+        self.songs        = songs
+        self.is_soundcloud = is_soundcloud
 
         options = []
         for i, song in enumerate(songs[:5]):
-            name   = song['name']   if is_spotify else song.title
-            artist = song.get('artist', '') if is_spotify else song.uploader
+            name   = song['name']   if is_soundcloud else song.title
+            artist = song.get('artist', '') if is_soundcloud else song.uploader
             label  = f"{name[:50]}"
             desc   = f"by {artist[:50]}" if artist else "Unknown artist"
             options.append(
                 discord.SelectOption(label=label, description=desc, value=str(i), emoji="🎵")
             )
 
-        self.select          = discord.ui.Select(placeholder="🎶 Choose a song to play…", options=options)
+        self.select          = discord.ui.Select(placeholder="🎶 Choose a song to play...", options=options)
         self.select.callback = self.select_callback
         self.add_item(self.select)
 
     async def select_callback(self, interaction: discord.Interaction):
         selected = int(self.select.values[0])
-        await self.music_cog.song_selected_callback(interaction, self.songs[selected], self.is_spotify)
+        await self.music_cog.song_selected_callback(interaction, self.songs[selected], self.is_soundcloud)
 
 
 # ──────────────────────────────────────────────

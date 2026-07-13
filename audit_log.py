@@ -19,6 +19,7 @@ from typing import Optional
 
 AUDIT_LOG_PATH = os.getenv("AUDIT_LOG_PATH", "audit_log.json")
 _MAX_SIZE = int(os.getenv("AUDIT_LOG_MAX_SIZE", str(10 * 1024 * 1024)))  # 10 MB
+_MAX_QUEUE = int(os.getenv("AUDIT_LOG_MAX_QUEUE", "1000"))  # in-memory cap before forced flush/drop
 _QUEUE: list[dict] = []
 _FLUSH_INTERVAL = 5  # seconds between flushes to disk
 
@@ -60,6 +61,7 @@ def record_command(
     options: Optional[dict] = None,
 ) -> None:
     """Add a command-usage record to the in-memory queue."""
+    global _QUEUE
     entry = {
         "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
         "user_id": user_id,
@@ -70,6 +72,11 @@ def record_command(
         "options": options or {},
     }
     _QUEUE.append(entry)
+    # Prevent unbounded memory growth if flush is delayed or fails
+    if len(_QUEUE) > _MAX_QUEUE:
+        dropped = _QUEUE[:len(_QUEUE) - _MAX_QUEUE]
+        _QUEUE = _QUEUE[-_MAX_QUEUE:]
+        print(f"[audit_log] Dropped {len(dropped)} entries due to in-memory queue overflow")
 
 
 def flush() -> int:

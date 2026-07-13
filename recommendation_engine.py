@@ -13,7 +13,8 @@ def _load_store():
     try:
         with open(RECOMMENDATION_STORE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[recommendation_engine] Failed to load store: {e}")
         return {"dismissed": [], "completed": []}
 
 def _save_store(data):
@@ -26,8 +27,9 @@ def _log_interaction(recommendation_id: str, action: str):
         try:
             with open(INTERACTION_LOG, "r", encoding="utf-8") as f:
                 log_data = json.load(f)
-        except:
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[recommendation_engine] Failed to load interaction log: {e}")
+            log_data = []
     
     log_data.append({
         "id": recommendation_id,
@@ -204,7 +206,8 @@ def get_interaction_stats() -> Dict:
     try:
         with open(INTERACTION_LOG, "r", encoding="utf-8") as f:
             log_data = json.load(f)
-    except:
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[recommendation_engine] Failed to load stats: {e}")
         return {"total": 0, "completed": 0, "dismissed": 0}
     
     completed = sum(1 for entry in log_data if entry["action"] == "completed")

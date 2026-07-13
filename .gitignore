@@ -2,3 +2,8 @@
 # Compiled Python
 __pycache__/
 venv/
+
+# Runtime data
+*.log
+backups/
+restart_state.json

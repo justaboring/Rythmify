@@ -24,13 +24,22 @@ def create_backup() -> str:
         "stats.json",
         "panel_store.json", 
         "request_channel_store.json",
-        ".env"
+        "quality_store.json",
+        "audit_log.json",
     ]
     
     with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for file in files_to_backup:
             if os.path.exists(file):
                 zipf.write(file, file)
+        env_path = os.path.join(os.path.dirname(__file__), '.env')
+        if os.path.exists(env_path):
+            # Include a README warning instead of the .env itself to avoid leaking secrets
+            zipf.writestr(
+                'RESTORE_README.txt',
+                'Environment configuration (.env) is intentionally excluded from this backup.\n'
+                'Restore your .env manually from a secure location.\n'
+            )
     
     return backup_path
 

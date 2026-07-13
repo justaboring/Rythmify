@@ -158,8 +158,10 @@ class ControlPanelView(discord.ui.View):
         # Refresh the previous song to get a fresh stream URL + apply filters
         from music_player import YTDLSource
         try:
-            refreshed = await YTDLSource.refresh(prev)
+            refreshed = await YTDLSource.refresh(prev, loop=interaction.client.loop)
         except Exception as e:
+            # Put prev back so user can retry later
+            guild_state.song_history.append(prev)
             return await interaction.response.send_message(f"❌ Error refreshing previous song: {e}", ephemeral=True)
 
         # Put current song back to front of queue
@@ -448,23 +450,6 @@ class QueueView(discord.ui.View):
     @discord.ui.button(emoji="🗑️", label="Clear", style=discord.ButtonStyle.danger)
     async def clear_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.clear_callback(interaction)
-
-
-class SkipVoteView(discord.ui.View):
-    def __init__(self, music_cog, current_votes, threshold):
-        super().__init__(timeout=30)
-        self.music_cog     = music_cog
-        self.current_votes = current_votes
-        self.threshold     = threshold
-
-    @discord.ui.button(label="Vote to Skip", emoji="⏭️", style=discord.ButtonStyle.primary)
-    async def vote_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.music_cog.skip_vote_callback(interaction)
-
-    def update_label(self, votes, threshold):
-        for child in self.children:
-            if hasattr(child, 'label'):
-                child.label = f"Vote to Skip ({votes}/{threshold})"
 
 
 class SongSelectView(discord.ui.View):

@@ -10,7 +10,8 @@ def _load() -> Dict:
     try:
         with open(PLAYLIST_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[playlist_store] Failed to load playlists: {e}")
         return {}
 
 def _save(data: Dict):

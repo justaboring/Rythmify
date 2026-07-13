@@ -16,7 +16,7 @@ from music_player import (
 from soundcloud_module import SoundCloudClient, soundcloud_to_youtube_query
 from admin_module import is_dj, can_skip, SkipVoteManager, remove_from_queue, move_in_queue, shuffle_queue, clear_queue
 from ui_components import (
-    NowPlayingView, QueueView, SkipVoteView, SongSelectView,
+    NowPlayingView, QueueView, SongSelectView,
     create_now_playing_embed, create_queue_embed, create_added_embed,
     ControlPanelView, create_control_panel_embed
 )
@@ -97,8 +97,8 @@ class MusicBot(commands.Bot):
                 target_guild = discord.Object(id=1106192482083016726)
                 self.tree.clear_commands(guild=target_guild)
                 await self.tree.sync(guild=target_guild)
-            except:
-                pass
+            except Exception as e:
+                print(f"[setup_hook] Failed to clear secondary guild commands: {e}")
 
             try:
                 await self.tree.sync()
@@ -117,7 +117,8 @@ class MusicBot(commands.Bot):
                     print(f"[Startup] Primary Bot {self.user} auto-joining owner in: {owner.voice.channel.name}")
                     try:
                         await owner.voice.channel.connect(timeout=60.0, reconnect=True)
-                    except: pass
+                    except Exception as e:
+                        print(f"[on_ready] Auto-connect for owner failed: {e}")
 
         # ── Restore States from previous session (Primary Only) ─────
         if self.is_primary and os.path.exists("restart_state.json"):
@@ -154,16 +155,6 @@ class MusicBot(commands.Bot):
                 await self.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="/help"))
 
 soundcloud_client = SoundCloudClient()
-
-
-async def process_spotify_list(interaction, voice_client, guild_state, queries):
-    """Stub retained for backwards compatibility; Spotify support removed."""
-    await interaction.followup.send("❌ Spotify integration has been removed from this project.", ephemeral=True)
-
-
-def handle_spotify_urls_sync(query: str) -> list:
-    """Stub retained for backwards compatibility; Spotify support removed."""
-    return []
 
 
 def find_voice_client(guild_id: int):
@@ -213,8 +204,10 @@ async def refresh_panel(guild: discord.Guild, guild_state, current_bot=None):
 # VOICE HELPERS 
 # ──────────────────────────────────────────────
 
-async def _parallel_load_tracks(tracks, interaction, guild_state, voice_client, max_tracks=50, success_msg="Added **{added}** tracks!"):
+async def _parallel_load_tracks(tracks, interaction, guild_state, voice_client, max_tracks=None, success_msg="Added **{added}** tracks!"):
     """Load multiple tracks in parallel with a concurrency limit. Returns added count."""
+    if max_tracks is None:
+        max_tracks = Config.MAX_QUEUE_SIZE
     sem = asyncio.Semaphore(4)
     added = 0
 
@@ -227,8 +220,8 @@ async def _parallel_load_tracks(tracks, interaction, guild_state, voice_client, 
                 source = await YTDLSource.from_url(track["url"], loop=interaction.client.loop, stream=True, requester=interaction.user)
                 if guild_state.add_to_queue(source):
                     added += 1
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[_parallel_load_tracks] failed to load {track.get('url', '?'):.80}: {e}")
 
     await asyncio.gather(*[_load(t) for t in tracks])
 
@@ -365,7 +358,7 @@ class MusicCog:
         await refresh_panel(interaction.guild, guild_state, interaction.client)
 
     async def stop_callback(self, interaction: discord.Interaction):
-        """Stop playback and clear the queue (DJ only, triggered from UI)."""
+        """Stop playback and clear the queue."""
         if not is_dj(interaction.user):
             return await interaction.response.send_message("❌ DJ only command!", ephemeral=True)
 
@@ -562,9 +555,11 @@ async def join(interaction: discord.Interaction):
     if not interaction.user.voice:
         return await interaction.response.send_message("❌ You must be in a voice channel!", ephemeral=True)
 
+    await interaction.response.defer(ephemeral=True)
     voice_client = await ensure_voice(interaction)
     if voice_client:
-        await interaction.response.send_message(f"✅ Joined **{voice_client.channel.name}**", ephemeral=True)
+        await interaction.followup.send(f"✅ Joined **{voice_client.channel.name}**", ephemeral=True)
+
 @app_commands.command(name="play", description="Play music from YouTube, SoundCloud, or a saved playlist")
 @app_commands.describe(query="Song name, URL, or saved playlist name")
 async def play(interaction: discord.Interaction, query: str):
@@ -1067,7 +1062,7 @@ async def backup_delete(interaction: discord.Interaction, backup_name: str):
     app_commands.Choice(name="High - Clear Audio", value="high"),
     app_commands.Choice(name="Lossless - Best Quality", value="lossless"),
 ])
-async def quality(interaction: discord.Interaction, quality: str = None):
+async def quality(interaction: discord.Interaction, quality: app_commands.Choice[str] = None):
     # Check permission (DJ or Admin)
     if not (is_dj(interaction.user) or interaction.user.guild_permissions.administrator):
         return await interaction.response.send_message("❌ DJ or Administrator only!", ephemeral=True)
@@ -1077,7 +1072,7 @@ async def quality(interaction: discord.Interaction, quality: str = None):
     user_id = interaction.user.id
     user_name = str(interaction.user)
 
-    if not quality:
+    if quality is None:
         # Show current quality
         current_quality = get_quality(guild_id)
         preset = Config.VOICE_QUALITY_PRESETS.get(current_quality)
@@ -1103,12 +1098,13 @@ async def quality(interaction: discord.Interaction, quality: str = None):
         embed.set_footer(text="Use /quality [preset] to change quality")
         return await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    quality_value = quality.value
     # Set new quality
-    if quality not in Config.VOICE_QUALITY_PRESETS:
+    if quality_value not in Config.VOICE_QUALITY_PRESETS:
         return await interaction.response.send_message("❌ Invalid quality!", ephemeral=True)
 
-    changed = set_quality(guild_id, guild_name, quality, user_id, user_name)
-    preset = Config.VOICE_QUALITY_PRESETS[quality]
+    changed = set_quality(guild_id, guild_name, quality_value, user_id, user_name)
+    preset = Config.VOICE_QUALITY_PRESETS[quality_value]
 
     embed = discord.Embed(
         title="🎵 Audio Quality Updated",
@@ -1116,7 +1112,7 @@ async def quality(interaction: discord.Interaction, quality: str = None):
     )
     embed.add_field(
         name="New Quality",
-        value=f"**{quality.capitalize()}**\n{preset['description']}",
+        value=f"**{quality_value.capitalize()}**\n{preset['description']}",
         inline=False
     )
     embed.add_field(
@@ -1243,14 +1239,39 @@ async def lyrics(interaction: discord.Interaction, query: str = None):
             return await interaction.followup.send("❌ Nothing is playing and no query provided!", ephemeral=True)
         query = guild_state.current_song.title
 
-    # Hint: Lu bisa pakai API lyrics.ovh (gratis & simple) atau Genius API
-    import aiohttp
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"https://api.lyrics.ovh/v1/_/_") as resp: # Placeholder logic
-            # Implementasi fetch lirik di sini
-            pass
+    try:
+        import aiohttp
+        # Sanitize query: extract artist and title heuristically
+        parts = query.split(" - ", 1)
+        if len(parts) == 2:
+            artist, title = parts[0].strip(), parts[1].strip()
+        else:
+            # Fallback: use query as both artist and title
+            artist = title = query.strip()
 
-    await interaction.followup.send(f"🔍 Searching lyrics for: **{query}**...\n*(Implement a lyrics API like Genius to see results here!)*", ephemeral=True)
+        import urllib.parse
+        artist = urllib.parse.quote(artist)
+        title = urllib.parse.quote(title)
+        url = f"https://api.lyrics.ovh/v1/{artist}/{title}"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(url) as resp:
+                if resp.status == 404:
+                    return await interaction.followup.send("❌ Lyrics not found.", ephemeral=True)
+                resp.raise_for_status()
+                data = await resp.json()
+
+        lyrics_text = data.get("lyrics", "").strip()
+        if not lyrics_text:
+            return await interaction.followup.send("❌ Lyrics not found.", ephemeral=True)
+
+        # Discord embed description max ~4096 chars; lyrics can be long
+        chunks = [lyrics_text[i:i+4000] for i in range(0, len(lyrics_text), 4000)]
+        first_embed = discord.Embed(title=f"🎤 {query}", description=chunks[0], color=discord.Color.gold())
+        await interaction.followup.send(embed=first_embed, ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(embed=discord.Embed(description=chunk, color=discord.Color.gold()), ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error fetching lyrics: {e}", ephemeral=True)
 
 @app_commands.command(name="filter", description="Apply audio filters to the music")
 @app_commands.describe(mode="Choose an audio filter")
@@ -1368,8 +1389,10 @@ async def shutdown_bot(interaction: discord.Interaction):
     # Cleanup voice connections for all bots
     for b in all_bots:
         for vc in b.voice_clients:
-            try: await vc.disconnect()
-            except: pass
+            try:
+                await vc.disconnect()
+            except Exception as e:
+                print(f"[shutdown] Disconnect error: {e}")
 
     # Exit code 130 tells run_bot.sh to stop the loop and exit the script
     sys.exit(130)
@@ -1644,10 +1667,9 @@ async def loop(interaction: discord.Interaction, mode: str):
     await interaction.response.send_message(f"{icons[mode]} **{labels[mode]}**", ephemeral=True)
     await refresh_panel(interaction.guild, guild_state, interaction.client)
 
-GUILD = discord.Object(id=1106192482083016726)
 
-# ────────────────────────────────────────────── 
-# EVENTS 
+# ──────────────────────────────────────────────
+# EVENTS
 # ──────────────────────────────────────────────
 
 async def handle_message_request(current_bot, message):
@@ -1701,8 +1723,10 @@ async def handle_message_request(current_bot, message):
     query = message.content.strip()
     if not query: return
 
-    try: await message.delete()
-    except: pass
+    try:
+        await message.delete()
+    except Exception as e:
+        print(f"[handle_request_message] Failed to delete request message: {e}")
 
     if not message.author.voice:
         await message.channel.send(f"❌ {message.author.mention} Join a voice channel first!", delete_after=5)
@@ -1781,21 +1805,33 @@ async def restore_guild_session(bot_instance: commands.Bot, guild_id: int, info:
 
         if info["current"]:
             source = await YTDLSource.from_url(info["current"]["url"], loop=bot_instance.loop, stream=True)
+
             for q in info["queue"]:
                 # Mock song object for queue persistence
                 dummy = type('Song', (), {
-                    'title': q['title'],
-                    'url': q['url'],
-                    'webpage_url': q['url'],
+                    'title': q.get('title', 'Unknown'),
+                    'url': q.get('url', ''),
+                    'webpage_url': q.get('url', ''),
+                    'uploader': q.get('uploader', 'Unknown'),
+                    'duration': q.get('duration'),
                     'format_duration': lambda: "?:??",
                     'requester': None,
                     'data': {}
                 })
                 state.queue.append(dummy)
 
-            # Start playback immediately
+            def _restore_after(error):
+                if error:
+                    print(f"[Restore] Playback error in {guild.name}: {error}")
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        play_next_song(vc, state, bot_instance.loop), bot_instance.loop
+                    )
+                except Exception as exc:
+                    print(f"[Restore] Failed to advance queue: {exc}")
+
+            vc.play(source, after=_restore_after)
             state.current_song = source
-            vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next_song(vc, state, bot_instance.loop), bot_instance.loop))
             if vc.source: vc.source.volume = state.volume
             await refresh_panel(guild, state, bot_instance)
             print(f"[Restore] Resumed playback in {guild.name}")
@@ -1813,7 +1849,6 @@ if __name__ == '__main__':
         playlist_create, playlist_save, playlist_load, playlist_list, playlist_delete,
         backup, backup_list, restore, backup_delete, quality,
         rec_reset, rec_stats,
-        # New features
     ]
 
     async def main():

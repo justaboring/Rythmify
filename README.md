@@ -7,6 +7,7 @@ A simple, educational Discord music bot that plays from YouTube via **yt-dlp**. 
 - 🎵 **Play music** from YouTube (URL/search) via yt-dlp
 - 🎧 **YouTube Music** — search, playlists, artist radio
 - 🔊 **SoundCloud** support
+- 🎤 **Lyrics** lookup via lyrics.ovh
 - 📋 **Queue** — loop, shuffle, move, remove
 - ⏭️ **Skip vote** + DJ force skip
 - 🎛️ **Volume control**
@@ -15,6 +16,8 @@ A simple, educational Discord music bot that plays from YouTube via **yt-dlp**. 
 - 📝 **Audit log** — tracks command usage
 - 🔁 **Autoplay / radio mode**
 - 🎚️ **Persistent control panel** (`/controlpanel`)
+- 🎚️ **Audio quality presets** — low/medium/high/lossless
+- 💾 **Backup/restore** — save and restore bot data
 
 ## Why yt-dlp (not Lavalink)?
 
@@ -42,41 +45,66 @@ python bot.py
 
 ## Commands
 
+### Playback
 | Command | Description |
 |---------|-------------|
-| **Playback** | |
 | `/play <query>` | Play from YouTube (URL/search) |
 | `/ytmusic <query>` | Play via YouTube Music |
 | `/soundcloud <query>` | Play from SoundCloud |
+| `/search <query>` | Search & choose |
+| `/lyrics [query]` | Get lyrics for current song |
 | `/pause` / `/resume` | Pause / Resume |
 | `/skip` / `/forceskip` | Vote / Force skip |
 | `/stop` | Stop & clear queue |
-| `/queue` | View queue |
 | `/nowplaying` | Current song info |
 | `/volume <0-100>` | Set volume |
 | `/loop <off/one/all>` | Loop modes |
-| **Queue Management** | |
+| `/crossfade <seconds>` | Enable/disable crossfade |
+| `/filter <mode>` | Apply audio filter (bassboost/nightcore/etc.) |
+| `/quality [preset]` | Set/check audio quality (DJ) |
+
+### Queue Management
+| Command | Description |
+|---------|-------------|
+| `/queue` | View queue |
 | `/shuffle` | Shuffle queue |
 | `/remove <pos>` | Remove from queue |
 | `/move <from> <to>` | Move queue position |
 | `/clear` | Clear queue |
-| **Utility** | |
-| `/controlpanel` | Toggle control panel |
-| `/search <query>` | Search & choose |
+
+### Utility
+| Command | Description |
+|---------|-------------|
+| `/controlpanel` | Toggle persistent control panel |
 | `/setrequestchannel` | Set auto-play channel |
+| `/join` / `/leave` | Join/Leave voice channel |
 | `/help` | Show all commands |
+
+### Admin/DJ
+| Command | Description |
+|---------|-------------|
+| `/backup` / `/restore` | Backup/restore bot data |
+| `/restart` / `/shutdown` | Owner restart/shutdown |
 
 ## Architecture
 
 ```
-├── bot.py                      # Main bot (monolithic, ~2000 lines)
+├── bot.py                      # Main bot (~1800 lines)
+├── config.py                   # Env-based configuration
 ├── music_player.py             # yt-dlp audio playback engine
 ├── ytmusic_module.py           # YouTube Music integration
 ├── soundcloud_module.py        # SoundCloud integration
-├── spotify_module.py           # Spotify URL search
+├── admin_module.py             # DJ permissions, skip votes
 ├── command_rate_limiter.py     # Per-user rate limiting
 ├── audit_log.py                # Command usage tracking
+├── backup_restore.py           # Backup/restore management
 ├── ui_components.py            # Discord UI views
+├── quality_store.py            # Per-guild audio quality settings
+├── playlist_store.py           # User playlist storage
+├── panel_store.py              # Control panel state
+├── request_channel_store.py    # Auto-play channel config
+├── recommendation_engine.py    # Dashboard recommendations
+├── stats_store.py              # Usage statistics
 └── requirements.txt
 ```
 

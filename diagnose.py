@@ -178,7 +178,6 @@ deps = [
     ("nacl",           "PyNaCl (voice)",     None),
     ("aiohttp",        "aiohttp",            None),
     ("ytmusicapi",     "ytmusicapi",         None),
-    ("spotipy",        "spotipy",            None),
 ]
 
 _all_ok = True

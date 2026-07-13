@@ -365,7 +365,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             pass
 
         # Get quality from requester's guild if not specified
-        if not quality_preset and song.requester and hasattr(song.requester, 'guild'):
+        if not quality_preset and getattr(song, 'requester', None) and hasattr(song.requester, 'guild'):
             quality_preset = get_quality(song.requester.guild.id)
 
         data = await loop.run_in_executor(
@@ -382,7 +382,8 @@ class YTDLSource(discord.PCMVolumeTransformer):
         stream_url = data['url']
 
         # Rebuild options with current filters and quality
-        state = get_guild_state(song.requester.guild.id) if song.requester else None
+        requester_guild = getattr(getattr(song, 'requester', None), 'guild', None)
+        state = get_guild_state(requester_guild.id) if requester_guild else None
         active_filter = state.active_filter if state else None
         ffmpeg_options = cls._build_ffmpeg_options(quality_preset, active_filter)
 
